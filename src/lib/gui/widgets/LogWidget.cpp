@@ -70,3 +70,8 @@ void LogWidget::scrollToBottom() const
   auto sb = m_textLog->verticalScrollBar();
   sb->setValue(sb->maximum());
 }
+
+void LogWidget::clear()
+{
+  m_textLog->clear();
+}

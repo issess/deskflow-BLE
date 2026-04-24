@@ -27,6 +27,7 @@ protected:
 
 private:
   LogWidget *m_textLog = nullptr;
+  QPushButton *m_btnClear = nullptr;
   QPushButton *m_btnClose = nullptr;
   QPushButton *m_btnFloat = nullptr;
   QLabel *m_lblTitle = nullptr;

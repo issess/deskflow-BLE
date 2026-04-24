@@ -89,7 +89,7 @@ add_library(${lib_name} STATIC ${PLATFORM_CODE}
   ipc/CoreIpcServer.h
 )
 
-target_link_libraries(${lib_name} PUBLIC common Qt6::Core Qt6::Network)
+target_link_libraries(${lib_name} PUBLIC common Qt6::Core Qt6::Network ble)
 
 if(WIN32)
   target_link_libraries(${lib_name} PRIVATE platform)
@@ -102,6 +102,7 @@ if(UNIX)
     arch
     client
     net
+    ble
     base
     platform
     mt

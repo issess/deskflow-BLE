@@ -376,7 +376,8 @@ void Client::setupConnecting()
 {
   assert(m_stream != nullptr);
 
-  if (Settings::value(Settings::Security::TlsEnabled).toBool()) {
+  const bool isBle = Settings::value(Settings::Core::Transport).toString() == QStringLiteral("ble");
+  if (!isBle && Settings::value(Settings::Security::TlsEnabled).toBool()) {
     m_events->addHandler(EventTypes::DataSocketSecureConnected, m_stream->getEventTarget(), [this](const auto &) {
       handleConnected();
     });
@@ -428,7 +429,13 @@ void Client::setupScreen()
 void Client::setupTimer()
 {
   assert(m_timer == nullptr);
-  m_timer = m_events->newOneShotTimer(2.0, nullptr);
+  // BLE pairing can take much longer than TCP connect (LE scan up to 10s
+  // plus GATT service discovery, notifications, and PairingStatus round
+  // trip). Detect the transport from Settings and use a generous window so
+  // the timer doesn't kill a legitimate in-flight pairing attempt.
+  const bool isBle = Settings::value(Settings::Core::Transport).toString() == QStringLiteral("ble");
+  const double timeoutSeconds = isBle ? 30.0 : 2.0;
+  m_timer = m_events->newOneShotTimer(timeoutSeconds, nullptr);
   m_events->addHandler(EventTypes::Timer, m_timer, [this](const auto &) { handleConnectTimeout(); });
 }
 

@@ -54,6 +54,8 @@ add_library(${target} STATIC
   dialogs/AboutDialog.cpp
   dialogs/AboutDialog.h
   dialogs/AboutDialog.ui
+  dialogs/BlePairingDialog.cpp
+  dialogs/BlePairingDialog.h
   dialogs/ActionDialog.cpp
   dialogs/ActionDialog.h
   dialogs/ActionDialog.ui
@@ -124,6 +126,7 @@ target_link_libraries(
   ${target}
   common
   platform
+  ble
   Qt6::Core
   Qt6::Widgets
   Qt6::Network)

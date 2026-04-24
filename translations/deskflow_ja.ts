@@ -136,6 +136,62 @@ p, li { white-space: pre-wrap; }
     </message>
 </context>
 <context>
+    <name>BlePairingDialog</name>
+    <message>
+        <source>BLE Pairing (Host)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>BLE Pairing (Remote)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Enter this code on the remote device:</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>The code resets every pairing session and is discarded once
+the remote connects. Keep this window open until paired.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Enter the 6-digit code shown on the host:</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Pair</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Waiting for core to start advertising…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Advertising — awaiting remote</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Paired successfully.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Pairing failed: %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>unknown error</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Enter all 6 digits.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Code submitted. Starting client core…</source>
+        <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
     <name>ClientConfigDialog</name>
     <message>
         <source>Client Configuration</source>
@@ -298,6 +354,10 @@ Do you want to connect to the server?
     <message>
         <source>Attach to window</source>
         <translation>ウィンドウに結合</translation>
+    </message>
+    <message>
+        <source>Clear log</source>
+        <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
@@ -565,6 +625,22 @@ Additionally, check you are able to %1 the server config file: %2</source>
     </message>
     <message>
         <source>&lt;p&gt;Keyboard layout support requires matching layouts on all computers. The following layouts from the other computer are not installed on this computer:&lt;/p&gt;&lt;p&gt;&lt;b&gt;%1&lt;/b&gt;&lt;/p&gt;&lt;p&gt;Please install them to enable support for these layouts.&lt;/p&gt;</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Transport:</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>TCP/IP</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>BLE (Bluetooth Low Energy)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>&amp;BLE Pair…</source>
         <translation type="unfinished"></translation>
     </message>
 </context>

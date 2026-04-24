@@ -41,6 +41,10 @@ public:
     inline static const auto XScrollScale = QStringLiteral("client/xScrollScale");
     inline static const auto LanguageSync = QStringLiteral("client/languageSync");
     inline static const auto RemoteHost = QStringLiteral("client/remoteHost");
+    inline static const auto RemoteBleDevice = QStringLiteral("client/remoteBleDevice");
+    // Ephemeral: GUI writes the 6-digit code here before starting core;
+    // core reads and clears it during BLE connect.
+    inline static const auto PendingBleCode = QStringLiteral("client/pendingBleCode");
     inline static const auto XdpRestoreToken = QStringLiteral("client/xdpRestoreToken");
   };
   struct Core
@@ -49,6 +53,8 @@ public:
     inline static const auto Interface = QStringLiteral("core/interface");
     inline static const auto LastVersion = QStringLiteral("core/lastVersion");
     inline static const auto Port = QStringLiteral("core/port");
+    inline static const auto Transport = QStringLiteral("core/transport"); // "tcp" | "ble"
+    inline static const auto BleBackend = QStringLiteral("core/bleBackend"); // "winrt" | "qt"
     inline static const auto PreventSleep = QStringLiteral("core/preventSleep");
     inline static const auto ProcessMode = QStringLiteral("core/processMode");
     inline static const auto ComputerName = QStringLiteral("core/computerName");
@@ -209,10 +215,14 @@ private:
     , Settings::Client::YScrollScale
     , Settings::Client::XScrollScale
     , Settings::Client::XdpRestoreToken
+    , Settings::Client::RemoteBleDevice
+    , Settings::Client::PendingBleCode
     , Settings::Core::CoreMode
     , Settings::Core::Interface
     , Settings::Core::LastVersion
     , Settings::Core::Port
+    , Settings::Core::Transport
+    , Settings::Core::BleBackend
     , Settings::Core::PreventSleep
     , Settings::Core::ProcessMode
     , Settings::Core::EnableEnterCommand

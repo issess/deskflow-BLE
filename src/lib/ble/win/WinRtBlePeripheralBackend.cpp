@@ -1,0 +1,613 @@
+/*
+ * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
+ * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
+ */
+
+#include "ble/win/WinRtBlePeripheralBackend.h"
+
+#include "base/Log.h"
+#include "ble/BleTransport.h"
+
+#include <QMetaObject>
+#include <QThread>
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.Devices.Bluetooth.h>
+#include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
+#include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
+
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <vector>
+
+namespace deskflow::ble {
+
+namespace {
+
+namespace wfnd = winrt::Windows::Foundation;
+namespace wfc = winrt::Windows::Foundation::Collections;
+namespace wbt = winrt::Windows::Devices::Bluetooth;
+namespace wgap = winrt::Windows::Devices::Bluetooth::GenericAttributeProfile;
+namespace wadv = winrt::Windows::Devices::Bluetooth::Advertisement;
+namespace wss = winrt::Windows::Storage::Streams;
+
+winrt::guid toGuid(const QBluetoothUuid &u)
+{
+  const quint128 raw = u.toUInt128();
+  winrt::guid g{};
+  g.Data1 = (static_cast<uint32_t>(raw.data[0]) << 24) | (static_cast<uint32_t>(raw.data[1]) << 16) |
+            (static_cast<uint32_t>(raw.data[2]) << 8) | static_cast<uint32_t>(raw.data[3]);
+  g.Data2 = static_cast<uint16_t>((raw.data[4] << 8) | raw.data[5]);
+  g.Data3 = static_cast<uint16_t>((raw.data[6] << 8) | raw.data[7]);
+  for (int i = 0; i < 8; ++i)
+    g.Data4[i] = raw.data[8 + i];
+  return g;
+}
+
+QByteArray ibufferToQByteArray(const wss::IBuffer &buf)
+{
+  if (!buf)
+    return {};
+  const uint32_t len = buf.Length();
+  if (len == 0)
+    return {};
+  wss::DataReader reader = wss::DataReader::FromBuffer(buf);
+  std::vector<uint8_t> bytes(len);
+  reader.ReadBytes(winrt::array_view<uint8_t>(bytes.data(), bytes.data() + len));
+  return QByteArray(reinterpret_cast<const char *>(bytes.data()), static_cast<int>(len));
+}
+
+wss::IBuffer qByteArrayToIBuffer(const QByteArray &ba)
+{
+  wss::DataWriter writer;
+  if (!ba.isEmpty()) {
+    writer.WriteBytes(
+        winrt::array_view<const uint8_t>(reinterpret_cast<const uint8_t *>(ba.constData()),
+                                         reinterpret_cast<const uint8_t *>(ba.constData()) + ba.size()));
+  }
+  return writer.DetachBuffer();
+}
+
+} // namespace
+
+// Worker thread that owns all WinRT objects. It runs its own serialized
+// task queue so we never touch WinRT from the Qt main (STA) thread.
+class WinRtWorker
+{
+public:
+  void start()
+  {
+    m_running = true;
+    m_thread = std::thread([this] { run(); });
+  }
+
+  void stop()
+  {
+    {
+      std::lock_guard<std::mutex> lock(m_mu);
+      m_running = false;
+      m_cv.notify_all();
+    }
+    if (m_thread.joinable())
+      m_thread.join();
+  }
+
+  void post(std::function<void()> fn)
+  {
+    std::lock_guard<std::mutex> lock(m_mu);
+    m_q.push(std::move(fn));
+    m_cv.notify_all();
+  }
+
+private:
+  void run()
+  {
+    try {
+      winrt::init_apartment(winrt::apartment_type::multi_threaded);
+      LOG_NOTE("WinRT worker: MTA apartment initialised");
+    } catch (const winrt::hresult_error &e) {
+      LOG_WARN("WinRT worker: init_apartment threw hr=0x%08x (continuing)",
+               static_cast<unsigned>(e.code().value));
+    }
+
+    while (true) {
+      std::function<void()> task;
+      {
+        std::unique_lock<std::mutex> lock(m_mu);
+        m_cv.wait(lock, [this] { return !m_running || !m_q.empty(); });
+        if (!m_running && m_q.empty())
+          break;
+        task = std::move(m_q.front());
+        m_q.pop();
+      }
+      try {
+        task();
+      } catch (const winrt::hresult_error &e) {
+        LOG_ERR("WinRT worker: task threw hr=0x%08x msg=%ls",
+                static_cast<unsigned>(e.code().value), e.message().c_str());
+      } catch (const std::exception &e) {
+        LOG_ERR("WinRT worker: task threw std::exception: %s", e.what());
+      } catch (...) {
+        LOG_ERR("WinRT worker: task threw unknown exception");
+      }
+    }
+
+    try {
+      winrt::uninit_apartment();
+    } catch (...) {
+    }
+    LOG_NOTE("WinRT worker: thread exiting");
+  }
+
+  std::thread m_thread;
+  std::mutex m_mu;
+  std::condition_variable m_cv;
+  std::queue<std::function<void()>> m_q;
+  bool m_running = false;
+};
+
+struct WinRtBlePeripheralBackend::Impl
+{
+  WinRtBlePeripheralBackend *owner = nullptr;
+  WinRtWorker worker;
+
+  wgap::GattServiceProvider serviceProvider{nullptr};
+  wgap::GattLocalCharacteristic pairingAuth{nullptr};
+  wgap::GattLocalCharacteristic pairingStatus{nullptr};
+  wgap::GattLocalCharacteristic dataDownstream{nullptr};
+  wgap::GattLocalCharacteristic dataUpstream{nullptr};
+  wgap::GattLocalCharacteristic control{nullptr};
+
+  winrt::event_token tokPairingAuthWrite{};
+  winrt::event_token tokDataUpstreamWrite{};
+  winrt::event_token tokAdvertisementStatusChanged{};
+  winrt::event_token tokSubscribedChangedStatus{};
+  winrt::event_token tokSubscribedChangedDownstream{};
+
+  std::atomic<bool> started{false};
+  std::atomic<bool> starting{false};
+  std::atomic<int> pairingStatusSubscribers{0};
+  std::atomic<int> downstreamSubscribers{0};
+  std::atomic<int> mtu{23};
+  QString localName;
+  QByteArray mfgPayload;
+
+  void emitStartFailed(const QString &reason)
+  {
+    QMetaObject::invokeMethod(owner, "startFailed", Qt::QueuedConnection, Q_ARG(QString, reason));
+  }
+  void emitStarted()
+  {
+    QMetaObject::invokeMethod(owner, "started", Qt::QueuedConnection);
+  }
+  void emitPairingAuthWritten(const QByteArray &v)
+  {
+    QMetaObject::invokeMethod(owner, "pairingAuthWritten", Qt::QueuedConnection, Q_ARG(QByteArray, v));
+  }
+  void emitUpstreamWritten(const QByteArray &v)
+  {
+    QMetaObject::invokeMethod(owner, "upstreamWritten", Qt::QueuedConnection, Q_ARG(QByteArray, v));
+  }
+  void emitCentralConnected()
+  {
+    QMetaObject::invokeMethod(owner, "centralConnected", Qt::QueuedConnection);
+  }
+  void emitCentralDisconnected()
+  {
+    QMetaObject::invokeMethod(owner, "centralDisconnected", Qt::QueuedConnection);
+  }
+
+  // Runs on the worker (MTA) thread.
+  bool workerStart()
+  {
+    LOG_NOTE("WinRT: worker start() begin");
+    bool supportsPeripheral = false;
+    // Log local BT adapter address — lets the user compare with what a
+    // sniffer / Bluetooth LE Explorer sees over the air.
+    try {
+      auto adapter = wbt::BluetoothAdapter::GetDefaultAsync().get();
+      if (adapter) {
+        auto mac = adapter.BluetoothAddress();
+        supportsPeripheral = adapter.IsPeripheralRoleSupported();
+        LOG_NOTE("WinRT: adapter addr=%02X:%02X:%02X:%02X:%02X:%02X peripheralSupported=%d centralSupported=%d advOffloadSupported=%d",
+                 (unsigned)((mac >> 40) & 0xFF), (unsigned)((mac >> 32) & 0xFF),
+                 (unsigned)((mac >> 24) & 0xFF), (unsigned)((mac >> 16) & 0xFF),
+                 (unsigned)((mac >> 8) & 0xFF), (unsigned)(mac & 0xFF),
+                 supportsPeripheral, adapter.IsCentralRoleSupported(),
+                 adapter.IsAdvertisementOffloadSupported());
+        if (!supportsPeripheral) {
+          LOG_WARN("WinRT: adapter reports peripheral role NOT supported; attempting StartAdvertising anyway");
+        }
+      } else {
+        LOG_WARN("WinRT: no default Bluetooth adapter");
+      }
+    } catch (const winrt::hresult_error &e) {
+      LOG_WARN("WinRT: adapter query threw hr=0x%08x",
+               static_cast<unsigned>(e.code().value));
+    }
+    try {
+      LOG_NOTE("WinRT: GattServiceProvider::CreateAsync calling");
+      auto op = wgap::GattServiceProvider::CreateAsync(toGuid(kServiceUuid));
+      auto result = op.get();
+      LOG_NOTE("WinRT: CreateAsync returned, error=%d", static_cast<int>(result.Error()));
+      if (result.Error() != wbt::BluetoothError::Success) {
+        emitStartFailed(
+            QStringLiteral("CreateAsync error %1").arg(static_cast<int>(result.Error())));
+        return false;
+      }
+      serviceProvider = result.ServiceProvider();
+      LOG_NOTE("WinRT: serviceProvider obtained");
+    } catch (const winrt::hresult_error &e) {
+      LOG_ERR("WinRT: CreateAsync threw hr=0x%08x msg=%ls",
+              static_cast<unsigned>(e.code().value), e.message().c_str());
+      emitStartFailed(QStringLiteral("CreateAsync hr=0x%1").arg(
+          QString::number(static_cast<quint32>(e.code().value), 16)));
+      return false;
+    }
+
+    auto addChar = [this](const QBluetoothUuid &uuid,
+                          wgap::GattCharacteristicProperties props,
+                          const char *label,
+                          wgap::GattLocalCharacteristic &out) -> bool {
+      try {
+        LOG_NOTE("WinRT: CreateCharacteristicAsync(%s) calling", label);
+        wgap::GattLocalCharacteristicParameters p;
+        p.CharacteristicProperties(props);
+        p.ReadProtectionLevel(wgap::GattProtectionLevel::Plain);
+        p.WriteProtectionLevel(wgap::GattProtectionLevel::Plain);
+        auto op = serviceProvider.Service().CreateCharacteristicAsync(toGuid(uuid), p);
+        auto res = op.get();
+        LOG_NOTE("WinRT: CreateCharacteristicAsync(%s) returned, error=%d",
+                 label, static_cast<int>(res.Error()));
+        if (res.Error() != wbt::BluetoothError::Success)
+          return false;
+        out = res.Characteristic();
+        return true;
+      } catch (const winrt::hresult_error &e) {
+        LOG_ERR("WinRT: CreateCharacteristicAsync(%s) threw hr=0x%08x",
+                label, static_cast<unsigned>(e.code().value));
+        return false;
+      }
+    };
+
+    if (!addChar(kPairingAuthCharUuid,
+                 wgap::GattCharacteristicProperties::Write |
+                     wgap::GattCharacteristicProperties::WriteWithoutResponse,
+                 "PairingAuth", pairingAuth)) {
+      emitStartFailed(QStringLiteral("PairingAuth characteristic create failed"));
+      return false;
+    }
+    if (!addChar(kPairingStatusCharUuid, wgap::GattCharacteristicProperties::Notify, "PairingStatus",
+                 pairingStatus)) {
+      emitStartFailed(QStringLiteral("PairingStatus characteristic create failed"));
+      return false;
+    }
+    if (!addChar(kDataDownstreamCharUuid, wgap::GattCharacteristicProperties::Notify,
+                 "DataDownstream", dataDownstream)) {
+      emitStartFailed(QStringLiteral("DataDownstream characteristic create failed"));
+      return false;
+    }
+    if (!addChar(kDataUpstreamCharUuid,
+                 wgap::GattCharacteristicProperties::Write |
+                     wgap::GattCharacteristicProperties::WriteWithoutResponse,
+                 "DataUpstream", dataUpstream)) {
+      emitStartFailed(QStringLiteral("DataUpstream characteristic create failed"));
+      return false;
+    }
+    if (!addChar(kControlCharUuid, wgap::GattCharacteristicProperties::Notify, "Control", control)) {
+      emitStartFailed(QStringLiteral("Control characteristic create failed"));
+      return false;
+    }
+
+    LOG_NOTE("WinRT: wiring events");
+    wireEvents();
+
+    LOG_NOTE("WinRT: calling StartAdvertising");
+    auto logAttemptResult = [this](const char *label) -> bool {
+      const auto status = serviceProvider.AdvertisementStatus();
+      LOG_NOTE("WinRT: attempt [%s] returned, status=%d", label, static_cast<int>(status));
+      if (status == wgap::GattServiceProviderAdvertisementStatus::Started) {
+        if (!started.exchange(true))
+          emitStarted();
+        return true;
+      }
+      return false;
+    };
+    auto logAttemptError = [](const char *label, const winrt::hresult_error &e) {
+      LOG_ERR("WinRT: attempt [%s] winrt::hresult_error 0x%08x msg=%ls",
+              label, static_cast<unsigned>(e.code().value), e.message().c_str());
+    };
+    auto attemptStartWithParams = [this, &logAttemptResult, &logAttemptError](
+                                      const char *label, bool connectable, bool discoverable) -> bool {
+      try {
+        LOG_NOTE("WinRT: attempt [%s]", label);
+        wgap::GattServiceProviderAdvertisingParameters p;
+        p.IsConnectable(connectable);
+        p.IsDiscoverable(discoverable);
+        serviceProvider.StartAdvertising(p);
+        return logAttemptResult(label);
+      } catch (const winrt::hresult_error &e) {
+        logAttemptError(label, e);
+      } catch (const std::exception &e) {
+        LOG_ERR("WinRT: attempt [%s] std::exception: %s", label, e.what());
+      } catch (...) {
+        LOG_ERR("WinRT: attempt [%s] unknown exception", label);
+      }
+      return false;
+    };
+    auto attemptStartDefault = [this, &logAttemptResult, &logAttemptError](const char *label) -> bool {
+      try {
+        LOG_NOTE("WinRT: attempt [%s]", label);
+        serviceProvider.StartAdvertising();
+        return logAttemptResult(label);
+      } catch (const winrt::hresult_error &e) {
+        logAttemptError(label, e);
+      } catch (const std::exception &e) {
+        LOG_ERR("WinRT: attempt [%s] std::exception: %s", label, e.what());
+      } catch (...) {
+        LOG_ERR("WinRT: attempt [%s] unknown exception", label);
+      }
+      return false;
+    };
+
+    // On adapters that report no peripheral role, the parameter overload can
+    // throw from inside C++/WinRT before our attempt-level catch can handle it.
+    // Try the default overload only; it is the least invasive stack probe.
+    starting = true;
+    bool ok = false;
+    if (!supportsPeripheral) {
+      ok = attemptStartDefault("default-no-args-no-peripheral-role");
+    } else {
+      // Walk several parameter combinations. Start with the documented GATT
+      // server mode; the later variants are diagnostics/fallbacks for stacks
+      // that reject one of the flags. Non-connectable advertising cannot carry
+      // Deskflow traffic, but its failure mode helps distinguish capability
+      // problems from parameter validation problems.
+      ok = attemptStartWithParams("connectable+discoverable", true, true);
+      if (!ok) {
+        ok = attemptStartWithParams("connectable-only", true, false);
+      }
+      if (!ok && started) {
+        ok = true;
+      }
+      if (!ok) {
+        ok = attemptStartWithParams("discoverable-only", false, true);
+      }
+      if (!ok && started) {
+        ok = true;
+      }
+      if (!ok) {
+        ok = attemptStartDefault("default-no-args");
+      }
+      if (!ok && started) {
+        ok = true;
+      }
+    }
+    if (!ok) {
+      starting = false;
+      emitStartFailed(QStringLiteral(
+          "All GattServiceProvider::StartAdvertising variants failed; adapter/driver may not support LE peripheral role"));
+      return false;
+    }
+    starting = false;
+    return true;
+  }
+
+  void wireEvents()
+  {
+    tokPairingAuthWrite = pairingAuth.WriteRequested(
+        [this](wgap::GattLocalCharacteristic const &, wgap::GattWriteRequestedEventArgs const &args) {
+          auto deferral = args.GetDeferral();
+          try {
+            auto req = args.GetRequestAsync().get();
+            if (req) {
+              QByteArray v = ibufferToQByteArray(req.Value());
+              if (req.Option() == wgap::GattWriteOption::WriteWithResponse)
+                req.Respond();
+              emitPairingAuthWritten(v);
+            }
+          } catch (...) {
+          }
+          deferral.Complete();
+        });
+
+    tokDataUpstreamWrite = dataUpstream.WriteRequested(
+        [this](wgap::GattLocalCharacteristic const &, wgap::GattWriteRequestedEventArgs const &args) {
+          auto deferral = args.GetDeferral();
+          try {
+            auto req = args.GetRequestAsync().get();
+            if (req) {
+              QByteArray v = ibufferToQByteArray(req.Value());
+              if (req.Option() == wgap::GattWriteOption::WriteWithResponse)
+                req.Respond();
+              emitUpstreamWritten(v);
+            }
+          } catch (...) {
+          }
+          deferral.Complete();
+        });
+
+    auto updateSubscribers = [this](const char *label, std::atomic<int> &counter,
+                                    wgap::GattLocalCharacteristic const &sender) {
+      const auto clients = sender.SubscribedClients();
+      const int n = static_cast<int>(clients.Size());
+      const int prevTotal = pairingStatusSubscribers.load() + downstreamSubscribers.load();
+      counter.store(n);
+      const int total = pairingStatusSubscribers.load() + downstreamSubscribers.load();
+      LOG_NOTE("WinRT: %s subscribed clients count = %d total=%d", label, n, total);
+      if (prevTotal == 0 && total > 0)
+        emitCentralConnected();
+      else if (prevTotal > 0 && total == 0)
+        emitCentralDisconnected();
+    };
+    tokSubscribedChangedStatus = pairingStatus.SubscribedClientsChanged(
+        [this, updateSubscribers](wgap::GattLocalCharacteristic const &sender,
+                                  wfnd::IInspectable const &) {
+          updateSubscribers("PairingStatus", pairingStatusSubscribers, sender);
+        });
+    tokSubscribedChangedDownstream = dataDownstream.SubscribedClientsChanged(
+        [this, updateSubscribers](wgap::GattLocalCharacteristic const &sender,
+                                  wfnd::IInspectable const &) {
+          updateSubscribers("DataDownstream", downstreamSubscribers, sender);
+        });
+
+    tokAdvertisementStatusChanged = serviceProvider.AdvertisementStatusChanged(
+        [this](wgap::GattServiceProvider const &sender,
+               wgap::GattServiceProviderAdvertisementStatusChangedEventArgs const &args) {
+          auto status = sender.AdvertisementStatus();
+          LOG_NOTE("WinRT: advertisement status -> %d error=%d",
+                   static_cast<int>(status), static_cast<int>(args.Error()));
+          if (status == wgap::GattServiceProviderAdvertisementStatus::Started) {
+            if (!started.exchange(true))
+              emitStarted();
+          } else if (status == wgap::GattServiceProviderAdvertisementStatus::Aborted) {
+            if (starting && !started) {
+              LOG_WARN("WinRT: advertisement aborted during startup attempt; trying fallback if available");
+              return;
+            }
+            emitStartFailed(QStringLiteral("advertisement aborted by stack, error=%1")
+                                .arg(static_cast<int>(args.Error())));
+          }
+        });
+  }
+
+  void workerStop()
+  {
+    LOG_NOTE("WinRT: workerStop");
+    try {
+      if (serviceProvider) {
+        if (tokAdvertisementStatusChanged.value)
+          serviceProvider.AdvertisementStatusChanged(tokAdvertisementStatusChanged);
+        if (serviceProvider.AdvertisementStatus() != wgap::GattServiceProviderAdvertisementStatus::Stopped)
+          serviceProvider.StopAdvertising();
+      }
+      if (pairingAuth && tokPairingAuthWrite.value)
+        pairingAuth.WriteRequested(tokPairingAuthWrite);
+      if (dataUpstream && tokDataUpstreamWrite.value)
+        dataUpstream.WriteRequested(tokDataUpstreamWrite);
+      if (pairingStatus && tokSubscribedChangedStatus.value)
+        pairingStatus.SubscribedClientsChanged(tokSubscribedChangedStatus);
+      if (dataDownstream && tokSubscribedChangedDownstream.value)
+        dataDownstream.SubscribedClientsChanged(tokSubscribedChangedDownstream);
+    } catch (...) {
+    }
+    serviceProvider = nullptr;
+    pairingAuth = nullptr;
+    pairingStatus = nullptr;
+    dataDownstream = nullptr;
+    dataUpstream = nullptr;
+    control = nullptr;
+    started = false;
+    starting = false;
+    pairingStatusSubscribers = 0;
+    downstreamSubscribers = 0;
+  }
+
+  void workerNotify(wgap::GattLocalCharacteristic &ch, const QByteArray &chunk)
+  {
+    if (!ch)
+      return;
+    try {
+      auto buf = qByteArrayToIBuffer(chunk);
+      ch.NotifyValueAsync(buf).get();
+    } catch (const winrt::hresult_error &e) {
+      LOG_WARN("WinRT: NotifyValueAsync threw hr=0x%08x",
+               static_cast<unsigned>(e.code().value));
+    } catch (const std::exception &e) {
+      LOG_WARN("WinRT: NotifyValueAsync threw std::exception: %s", e.what());
+    }
+  }
+};
+
+WinRtBlePeripheralBackend::WinRtBlePeripheralBackend(QObject *parent)
+    : IBlePeripheralBackend(parent), m_impl(std::make_unique<Impl>())
+{
+  m_impl->owner = this;
+  m_impl->worker.start();
+}
+
+WinRtBlePeripheralBackend::~WinRtBlePeripheralBackend()
+{
+  if (m_impl) {
+    // Ensure any pending WinRT work completes before we tear down.
+    m_impl->worker.post([this] { m_impl->workerStop(); });
+    m_impl->worker.stop();
+  }
+}
+
+bool WinRtBlePeripheralBackend::start(const QString &localName, const QByteArray &manufacturerPayload)
+{
+  LOG_NOTE("WinRtBlePeripheralBackend::start (dispatching to worker)");
+  m_impl->localName = localName;
+  m_impl->mfgPayload = manufacturerPayload;
+  m_impl->worker.post([this] {
+    try {
+      m_impl->workerStart();
+    } catch (const winrt::hresult_error &e) {
+      LOG_ERR("WinRT: workerStart escaped hr=0x%08x msg=%ls",
+              static_cast<unsigned>(e.code().value), e.message().c_str());
+      if (m_impl->started) {
+        LOG_WARN("WinRT: ignoring late workerStart hresult after advertising started");
+        return;
+      }
+      m_impl->emitStartFailed(QStringLiteral("WinRT workerStart hr=0x%1")
+                                  .arg(QString::number(static_cast<quint32>(e.code().value), 16)));
+    } catch (const std::exception &e) {
+      LOG_ERR("WinRT: workerStart escaped std::exception: %s", e.what());
+      if (m_impl->started) {
+        LOG_WARN("WinRT: ignoring late workerStart exception after advertising started");
+        return;
+      }
+      m_impl->emitStartFailed(QStringLiteral("WinRT workerStart exception: %1")
+                                  .arg(QString::fromUtf8(e.what())));
+    } catch (...) {
+      LOG_ERR("WinRT: workerStart escaped unknown exception");
+      if (m_impl->started) {
+        LOG_WARN("WinRT: ignoring late workerStart unknown exception after advertising started");
+        return;
+      }
+      m_impl->emitStartFailed(QStringLiteral("WinRT workerStart unknown exception"));
+    }
+  });
+  return true; // async result via `started` or `startFailed` signals
+}
+
+void WinRtBlePeripheralBackend::stop()
+{
+  if (m_impl)
+    m_impl->worker.post([this] { m_impl->workerStop(); });
+}
+
+void WinRtBlePeripheralBackend::sendPairingStatus(quint8 status)
+{
+  if (!m_impl)
+    return;
+  QByteArray payload(1, static_cast<char>(status));
+  m_impl->worker.post([this, payload] {
+    m_impl->workerNotify(m_impl->pairingStatus, payload);
+  });
+}
+
+void WinRtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
+{
+  if (!m_impl)
+    return;
+  m_impl->worker.post([this, chunk] { m_impl->workerNotify(m_impl->dataDownstream, chunk); });
+}
+
+int WinRtBlePeripheralBackend::negotiatedMtu() const
+{
+  return m_impl ? m_impl->mtu.load() : 23;
+}
+
+} // namespace deskflow::ble

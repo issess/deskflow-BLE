@@ -17,6 +17,7 @@
 LogDock::LogDock(QWidget *parent)
     : QDockWidget(tr("Log"), parent),
       m_textLog{new LogWidget(this)},
+      m_btnClear{new QPushButton(this)},
       m_btnClose{new QPushButton(this)},
       m_btnFloat{new QPushButton(this)},
       m_lblTitle{new QLabel(tr("Log"), this)},
@@ -27,6 +28,13 @@ LogDock::LogDock(QWidget *parent)
 
   const auto iconSize = QSize(fontMetrics().height() - 2, fontMetrics().height() - 2);
   const auto maxBtnSize = QSize(fontMetrics().height() + 2, fontMetrics().height() + 2);
+
+  m_btnClear->setFixedSize(maxBtnSize);
+  m_btnClear->setFlat(true);
+  m_btnClear->setIcon(QIcon::fromTheme(QStringLiteral("edit-clear")));
+  m_btnClear->setIconSize(iconSize);
+  m_btnClear->setToolTip(tr("Clear log"));
+  connect(m_btnClear, &QPushButton::clicked, m_textLog, &LogWidget::clear);
 
   m_btnFloat->setFixedSize(maxBtnSize);
   m_btnFloat->setCheckable(true);
@@ -50,6 +58,7 @@ LogDock::LogDock(QWidget *parent)
   titleLayout->addWidget(m_lblTitle, Qt::AlignLeft | Qt::AlignVCenter);
   titleLayout->addSpacerItem(new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Fixed));
   titleLayout->addWidget(m_searchWidget, Qt::AlignRight | Qt::AlignVCenter);
+  titleLayout->addWidget(m_btnClear, Qt::AlignRight | Qt::AlignVCenter);
   titleLayout->addWidget(m_btnFloat, Qt::AlignRight | Qt::AlignVCenter);
   titleLayout->addWidget(m_btnClose, Qt::AlignRight | Qt::AlignVCenter);
   setTitleBarWidget(titleWidget);
@@ -103,6 +112,7 @@ void LogDock::changeEvent(QEvent *e)
 
   setWindowTitle(tr("Log"));
   m_lblTitle->setText(tr("Log"));
+  m_btnClear->setToolTip(tr("Clear log"));
   m_btnFloat->setToolTip(tr("Detach from window"));
   m_btnClose->setToolTip(tr("Close Log"));
   if (isFloating())

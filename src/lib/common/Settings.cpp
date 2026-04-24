@@ -195,6 +195,17 @@ QVariant Settings::defaultValue(const QString &key)
   if (key == Core::Port)
     return 24800;
 
+  if (key == Core::Transport)
+    return QStringLiteral("tcp");
+
+  if (key == Core::BleBackend) {
+#ifdef Q_OS_WIN
+    return QStringLiteral("winrt");
+#else
+    return QStringLiteral("qt");
+#endif
+  }
+
   if (key == Core::ProcessMode) {
 #ifdef Q_OS_WIN
     if (!Settings::isPortableMode())

@@ -21,6 +21,7 @@ public:
   void findNext(const QString &text);
   void findPrevious(const QString &text);
   void scrollToBottom() const;
+  void clear();
 
 private:
   QPlainTextEdit *m_textLog = nullptr;

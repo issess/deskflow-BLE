@@ -14,6 +14,7 @@
 #include "StyleUtils.h"
 
 #include "dialogs/AboutDialog.h"
+#include "dialogs/BlePairingDialog.h"
 #include "dialogs/ClientConfigDialog.h"
 #include "dialogs/FingerprintDialog.h"
 #include "dialogs/ServerConfigDialog.h"
@@ -33,8 +34,13 @@
 
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDesktopServices>
 #include <QFileDialog>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QVBoxLayout>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QMenu>
@@ -82,6 +88,87 @@ MainWindow::MainWindow()
       m_networkMonitor{new NetworkMonitor(this)}
 {
   ui->setupUi(this);
+
+  // Inject a transport selector row (TCP/IP vs BLE) + BLE Pair button into
+  // the mode-selection groupBox so users can pick the transport and trigger
+  // pairing directly from the main window.
+  {
+    auto *row = new QWidget(ui->groupBox);
+    auto *rowLayout = new QHBoxLayout(row);
+    rowLayout->setContentsMargins(0, 0, 0, 0);
+    auto *label = new QLabel(tr("Transport:"), row);
+    m_cbTransport = new QComboBox(row);
+    m_cbTransport->addItem(tr("TCP/IP"), QStringLiteral("tcp"));
+    m_cbTransport->addItem(tr("BLE (Bluetooth Low Energy)"), QStringLiteral("ble"));
+    auto *backendLabel = new QLabel(tr("BLE backend:"), row);
+    m_cbBleBackend = new QComboBox(row);
+#if defined(Q_OS_WIN)
+    m_cbBleBackend->addItem(tr("WinRT"), QStringLiteral("winrt"));
+#endif
+    m_cbBleBackend->addItem(tr("Qt Bluetooth"), QStringLiteral("qt"));
+    m_btnBlePair = new QPushButton(tr("&BLE Pair…"), row);
+    rowLayout->addWidget(label);
+    rowLayout->addWidget(m_cbTransport);
+    rowLayout->addWidget(backendLabel);
+    rowLayout->addWidget(m_cbBleBackend);
+    rowLayout->addStretch();
+    rowLayout->addWidget(m_btnBlePair);
+    // Insert just below the Server/Client mode selector (index 0 is the
+    // widgetModeSelection in groupBox's vertical layout).
+    if (auto *vbox = qobject_cast<QVBoxLayout *>(ui->groupBox->layout())) {
+      vbox->insertWidget(1, row);
+    }
+
+    // Seed from current setting.
+    const auto current = Settings::value(Settings::Core::Transport).toString();
+    const int idx = m_cbTransport->findData(current.isEmpty() ? QStringLiteral("tcp") : current);
+    m_cbTransport->setCurrentIndex(idx >= 0 ? idx : 0);
+    const auto currentBackend = Settings::value(Settings::Core::BleBackend).toString();
+    const int backendIdx = m_cbBleBackend->findData(currentBackend.isEmpty() ? QStringLiteral("winrt") : currentBackend);
+    m_cbBleBackend->setCurrentIndex(backendIdx >= 0 ? backendIdx : 0);
+    const auto updateBleControls = [this] {
+      const bool ble = m_cbTransport->currentData().toString() == QStringLiteral("ble");
+      m_btnBlePair->setEnabled(ble);
+      m_cbBleBackend->setEnabled(ble);
+    };
+    updateBleControls();
+
+    connect(m_cbTransport, &QComboBox::currentIndexChanged, this, [this, updateBleControls](int) {
+      const QString v = m_cbTransport->currentData().toString();
+      Settings::setValue(Settings::Core::Transport, v);
+      Settings::save();
+      updateBleControls();
+    });
+
+    connect(m_cbBleBackend, &QComboBox::currentIndexChanged, this, [this](int) {
+      Settings::setValue(Settings::Core::BleBackend, m_cbBleBackend->currentData().toString());
+      Settings::save();
+    });
+
+    connect(m_btnBlePair, &QPushButton::clicked, this, [this] {
+      // Ensure transport is BLE before launching.
+      Settings::setValue(Settings::Core::Transport, QStringLiteral("ble"));
+      Settings::save();
+      const int bleIdx = m_cbTransport->findData(QStringLiteral("ble"));
+      if (bleIdx >= 0)
+        m_cbTransport->setCurrentIndex(bleIdx);
+      const auto mode =
+          ui->rbModeServer->isChecked() ? BlePairingDialog::Mode::Host : BlePairingDialog::Mode::Remote;
+      auto *dlg = new BlePairingDialog(mode, this);
+      dlg->setAttribute(Qt::WA_DeleteOnClose);
+      // Remote: after the user submits the code, auto-start the client core
+      // so the BLE connect path runs immediately and its progress shows up
+      // in the log. Host: start the core right away to begin advertising.
+      connect(dlg, &BlePairingDialog::remoteCodeSubmitted, this, [this] {
+        if (!m_coreProcess.isStarted())
+          startCore();
+      });
+      dlg->show();
+      if (mode == BlePairingDialog::Mode::Host && !m_coreProcess.isStarted()) {
+        startCore();
+      }
+    });
+  }
 
   setWindowIcon(QIcon::fromTheme(kRevFqdnName));
 
@@ -397,6 +484,8 @@ void MainWindow::coreProcessError(CoreProcess::Error error)
 
 void MainWindow::startCore()
 {
+  saveSettings();
+
   // Save current IP state when server starts
   if (m_coreProcess.mode() == CoreMode::Server && Settings::value(Settings::Core::Interface).toString().isEmpty()) {
     m_serverStartIPs = NetworkMonitor::validAddresses();
@@ -705,13 +794,22 @@ void MainWindow::applyConfig()
 
 void MainWindow::saveSettings() const
 {
+  const bool bleTransport = m_cbTransport && m_cbTransport->currentData().toString() == QStringLiteral("ble");
+  if (m_cbTransport)
+    Settings::setValue(Settings::Core::Transport, m_cbTransport->currentData().toString());
+  if (m_cbBleBackend)
+    Settings::setValue(Settings::Core::BleBackend, m_cbBleBackend->currentData().toString());
+
   if (ui->rbModeClient->isChecked()) {
     Settings::setValue(Settings::Core::CoreMode, Settings::CoreMode::Client);
   } else if (ui->rbModeServer->isChecked()) {
     Settings::setValue(Settings::Core::CoreMode, Settings::CoreMode::Server);
   }
-  if (!ui->lineHostname->text().isEmpty())
+  if (bleTransport) {
+    Settings::setValue(Settings::Client::RemoteHost);
+  } else if (!ui->lineHostname->text().isEmpty()) {
     Settings::setValue(Settings::Client::RemoteHost, ui->lineHostname->text());
+  }
   Settings::save();
 }
 
@@ -1204,6 +1302,13 @@ void MainWindow::toggleCanRunCore(bool enableButtons)
 
 void MainWindow::remoteHostChanged(const QString &newRemoteHost)
 {
+  if (m_cbTransport && m_cbTransport->currentData().toString() == QStringLiteral("ble")) {
+    m_coreProcess.setAddress(QString());
+    toggleCanRunCore(ui->rbModeClient->isChecked());
+    Settings::setValue(Settings::Client::RemoteHost);
+    return;
+  }
+
   m_coreProcess.setAddress(newRemoteHost);
   toggleCanRunCore(!newRemoteHost.isEmpty() && ui->rbModeClient->isChecked());
   if (newRemoteHost.isEmpty()) {
@@ -1270,5 +1375,6 @@ bool MainWindow::canRunCore() const
   const auto mode = m_coreProcess.mode();
   const bool isServer = mode == Settings::CoreMode::Server;
   const bool isClient = mode == Settings::CoreMode::Client;
-  return ((isServer || isClient) && (isClient && !ui->lineHostname->text().isEmpty()) || isServer);
+  const bool bleTransport = m_cbTransport && m_cbTransport->currentData().toString() == QStringLiteral("ble");
+  return isServer || (isClient && (bleTransport || !ui->lineHostname->text().isEmpty()));
 }

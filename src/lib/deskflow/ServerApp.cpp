@@ -21,6 +21,8 @@
 #include "deskflow/ipc/CoreIpc.h"
 #include "net/SocketException.h"
 #include "net/SocketMultiplexer.h"
+#include "ble/BleSocketFactory.h"
+#include "common/Settings.h"
 #include "net/TCPSocketFactory.h"
 #include "server/ClientListener.h"
 #include "server/ClientProxy.h"
@@ -442,7 +444,8 @@ ClientListener *ServerApp::openClientListener(const NetworkAddress &address)
 {
   using enum SecurityLevel;
   auto securityLevel = PlainText;
-  if (Settings::value(Settings::Security::TlsEnabled).toBool()) {
+  const bool isBle = Settings::value(Settings::Core::Transport).toString() == QStringLiteral("ble");
+  if (!isBle && Settings::value(Settings::Security::TlsEnabled).toBool()) {
     if (Settings::value(Settings::Security::CheckPeers).toBool()) {
       securityLevel = PeerAuth;
     } else {
@@ -480,6 +483,12 @@ void ServerApp::handleScreenSwitched() const
 
 std::unique_ptr<ISocketFactory> ServerApp::getSocketFactory() const
 {
+  const auto transport = Settings::value(Settings::Core::Transport).toString();
+  LOG_NOTE("ServerApp::getSocketFactory transport=%s", transport.toUtf8().constData());
+  if (transport == QStringLiteral("ble")) {
+    LOG_NOTE("ServerApp: creating BLE socket factory");
+    return std::make_unique<deskflow::ble::BleSocketFactory>(getEvents());
+  }
   return std::make_unique<TCPSocketFactory>(getEvents(), getSocketMultiplexer());
 }
 

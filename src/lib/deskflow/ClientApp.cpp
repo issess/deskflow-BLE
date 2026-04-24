@@ -21,6 +21,8 @@
 #include "net/NetworkAddress.h"
 #include "net/SocketException.h"
 #include "net/SocketMultiplexer.h"
+#include "ble/BleSocketFactory.h"
+#include "common/Settings.h"
 #include "net/TCPSocketFactory.h"
 
 #if defined(Q_OS_WIN)
@@ -50,6 +52,28 @@ ClientApp::ClientApp(IEventQueue *events, const QString &processName) : App(even
 
 void ClientApp::parseArgs()
 {
+  // BLE transport discovers the host by scanning, so a conventional server
+  // address is neither required nor used. Inject a synthetic placeholder
+  // so the rest of ClientApp's plumbing (which iterates m_serverAddresses)
+  // has something to hand to BleSocket::connect, which ignores it.
+  const auto transport = Settings::value(Settings::Core::Transport).toString();
+  if (transport == QStringLiteral("ble")) {
+    // Use a loopback placeholder that actually resolves. BleSocket::connect
+    // ignores the address entirely (peer is chosen via BLE scan), but the
+    // generic Client::connect path calls NetworkAddress::resolve() and
+    // ARCH->getAddrFamily() on it, both of which need a real IP. 127.0.0.1
+    // is harmless since we never actually open a TCP connection to it.
+    NetworkAddress placeholder(std::string("127.0.0.1"), 1);
+    try {
+      placeholder.resolve();
+    } catch (...) {
+      // Unlikely to fail for loopback, but don't abort if it does.
+    }
+    m_serverAddresses.append(placeholder);
+    LOG_NOTE("BLE transport: using loopback placeholder (scan-driven peer selection)");
+    return;
+  }
+
   // save server addresses (comma-separated list supported)
   if (const auto addressList = Settings::value(Settings::Client::RemoteHost).toString(); !addressList.isEmpty()) {
     const int port = Settings::value(Settings::Core::Port).toInt();
@@ -384,6 +408,12 @@ void ClientApp::startNode()
 
 ISocketFactory *ClientApp::getSocketFactory() const
 {
+  const auto transport = Settings::value(Settings::Core::Transport).toString();
+  LOG_NOTE("ClientApp::getSocketFactory transport=%s", transport.toUtf8().constData());
+  if (transport == QStringLiteral("ble")) {
+    LOG_NOTE("ClientApp: creating BLE socket factory");
+    return new deskflow::ble::BleSocketFactory(getEvents());
+  }
   return new TCPSocketFactory(getEvents(), getSocketMultiplexer());
 }
 

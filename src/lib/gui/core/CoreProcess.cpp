@@ -7,6 +7,7 @@
 
 #include "CoreProcess.h"
 
+#include "ble/BlePairingBroker.h"
 #include "common/ExitCodes.h"
 #include "gui/ipc/CoreIpcClient.h"
 #include "gui/ipc/DaemonIpcClient.h"
@@ -318,6 +319,27 @@ void CoreProcess::handleLogLines(const QString &text)
       continue;
     }
 
+    // Core-to-GUI BLE pairing channel. These sentinel lines carry the
+    // current 6-digit code and pairing outcome across the process boundary
+    // so the GUI broker singleton can feed BlePairingDialog. Strip them
+    // from the user-facing log stream.
+    if (line.startsWith(QStringLiteral("BLE_PAIRING:CODE="))) {
+      const QString code = line.mid(QStringLiteral("BLE_PAIRING:CODE=").size()).trimmed();
+      if (code.isEmpty())
+        deskflow::ble::BlePairingBroker::instance().clearActiveCode();
+      else
+        deskflow::ble::BlePairingBroker::instance().setActiveCode(code);
+      continue;
+    }
+    if (line.startsWith(QStringLiteral("BLE_PAIRING:RESULT="))) {
+      const QString payload = line.mid(QStringLiteral("BLE_PAIRING:RESULT=").size()).trimmed();
+      const int sep = payload.indexOf(QLatin1Char(':'));
+      const QString kind = sep >= 0 ? payload.left(sep) : payload;
+      const QString reason = sep >= 0 ? payload.mid(sep + 1) : QString();
+      deskflow::ble::BlePairingBroker::instance().reportResult(kind == QStringLiteral("accepted"), reason);
+      continue;
+    }
+
 #if defined(Q_OS_MACOS)
     // HACK: macOS 10.13.4+ spamming error lines in logs making them
     // impossible to read and debug; giving users a red herring.
@@ -442,6 +464,8 @@ void CoreProcess::start(std::optional<ProcessMode> processModeOption)
       },
       static_cast<Qt::ConnectionType>(Qt::SingleShotConnection | Qt::QueuedConnection)
   );
+
+  args.append({QStringLiteral("--settings"), Settings::settingsFile()});
 
   if (processMode == ProcessMode::Desktop) {
     startForegroundProcess(args);

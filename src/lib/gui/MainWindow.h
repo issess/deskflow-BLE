@@ -25,8 +25,10 @@
 #endif
 
 class QAction;
+class QComboBox;
 class QMenu;
 class QLocalServer;
+class QPushButton;
 
 class DeskflowApplication;
 class LogDock;
@@ -200,6 +202,11 @@ private:
   QAction *m_actionStartCore = nullptr;
   QAction *m_actionRestartCore = nullptr;
   QAction *m_actionStopCore = nullptr;
+
+  // BLE transport widgets (injected into the main window layout).
+  QComboBox *m_cbTransport = nullptr;
+  QComboBox *m_cbBleBackend = nullptr;
+  QPushButton *m_btnBlePair = nullptr;
 
   // Network monitoring
   NetworkMonitor *m_networkMonitor = nullptr;
