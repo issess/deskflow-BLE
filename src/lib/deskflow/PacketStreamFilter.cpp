@@ -11,6 +11,7 @@
 #include "deskflow/ProtocolTypes.h"
 
 #include <cstring>
+#include <vector>
 
 //
 // PacketStreamFilter
@@ -69,16 +70,20 @@ uint32_t PacketStreamFilter::read(void *buffer, uint32_t n)
 
 void PacketStreamFilter::write(const void *buffer, uint32_t count)
 {
-  // write the length of the payload
-  uint8_t length[4];
-  length[0] = (uint8_t)((count >> 24) & 0xff);
-  length[1] = (uint8_t)((count >> 16) & 0xff);
-  length[2] = (uint8_t)((count >> 8) & 0xff);
-  length[3] = (uint8_t)(count & 0xff);
-  getStream()->write(length, sizeof(length));
-
-  // write the payload
-  getStream()->write(buffer, count);
+  // Emit length-prefix and payload as a single inner-stream write so
+  // packetizing transports (e.g. BLE GATT) wrap the full message in one
+  // frame instead of two. The two-write split previously here doubled the
+  // GATT transactions on every protocol message.
+  std::vector<uint8_t> framed;
+  framed.resize(4 + count);
+  framed[0] = static_cast<uint8_t>((count >> 24) & 0xff);
+  framed[1] = static_cast<uint8_t>((count >> 16) & 0xff);
+  framed[2] = static_cast<uint8_t>((count >> 8) & 0xff);
+  framed[3] = static_cast<uint8_t>(count & 0xff);
+  if (count > 0 && buffer != nullptr) {
+    std::memcpy(framed.data() + 4, buffer, count);
+  }
+  getStream()->write(framed.data(), framed.size());
 }
 
 void PacketStreamFilter::shutdownInput()

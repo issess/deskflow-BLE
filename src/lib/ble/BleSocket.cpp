@@ -70,7 +70,7 @@ BleSocketContext::~BleSocketContext() = default;
 void BleSocketContext::attachPeripheral(QLowEnergyService *service, int mtu)
 {
   m_service = service;
-  m_mtu = mtu > 0 ? mtu : 23;
+  m_mtu = mtu > 0 ? mtu : 512;
   m_role = Role::Peripheral;
   if (!service)
     return;
@@ -82,7 +82,7 @@ void BleSocketContext::attachPeripheral(QLowEnergyService *service, int mtu)
 void BleSocketContext::attachPeripheralBackend(deskflow::ble::IBlePeripheralBackend *backend, int mtu)
 {
   m_peripheralBackend = backend;
-  m_mtu = mtu > 0 ? mtu : 23;
+  m_mtu = mtu > 0 ? mtu : 512;
   m_role = Role::Peripheral;
 }
 

@@ -22,6 +22,7 @@
 #include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -178,7 +179,7 @@ struct WinRtBlePeripheralBackend::Impl
   std::atomic<bool> starting{false};
   std::atomic<int> pairingStatusSubscribers{0};
   std::atomic<int> downstreamSubscribers{0};
-  std::atomic<int> mtu{23};
+  std::atomic<int> mtu{512};
   QString localName;
   QByteArray mfgPayload;
 
@@ -205,6 +206,50 @@ struct WinRtBlePeripheralBackend::Impl
   void emitCentralDisconnected()
   {
     QMetaObject::invokeMethod(owner, "centralDisconnected", Qt::QueuedConnection);
+  }
+  void emitMtuChanged(int v)
+  {
+    QMetaObject::invokeMethod(owner, "mtuChanged", Qt::QueuedConnection, Q_ARG(int, v));
+  }
+
+  // Inspect any currently-subscribed client's GATT session and pull its
+  // negotiated MaxPduSize. WinRT exposes per-client GattSession with the
+  // negotiated ATT MTU; we use the highest value reported across the
+  // current subscribers and propagate it up so chunking uses real-MTU
+  // sized writes instead of the 23-byte ATT default. Quiet on errors —
+  // fallback chunking still works at the default MTU.
+  void refreshNegotiatedMtuFromSubscribers()
+  {
+    auto probe = [this](wgap::GattLocalCharacteristic const &ch) -> int {
+      if (!ch)
+        return 0;
+      int best = 0;
+      try {
+        auto subs = ch.SubscribedClients();
+        for (uint32_t i = 0; i < subs.Size(); ++i) {
+          auto sub = subs.GetAt(i);
+          auto session = sub.Session();
+          if (!session)
+            continue;
+          int s = static_cast<int>(session.MaxPduSize());
+          if (s > best)
+            best = s;
+        }
+      } catch (...) {
+      }
+      return best;
+    };
+    const int s1 = probe(pairingStatus);
+    const int s2 = probe(dataDownstream);
+    const int negotiated = std::max(s1, s2);
+    if (negotiated <= 0)
+      return;
+    const int prev = mtu.load();
+    if (negotiated == prev)
+      return;
+    mtu.store(negotiated);
+    LOG_NOTE("WinRT: MTU updated %d -> %d (from peer GattSession)", prev, negotiated);
+    emitMtuChanged(negotiated);
   }
 
   // Runs on the worker (MTA) thread.
@@ -452,6 +497,11 @@ struct WinRtBlePeripheralBackend::Impl
         LOG_NOTE("WinRT: emitCentralDisconnected (prevTotal=%d -> total=0)", prevTotal);
         emitCentralDisconnected();
       }
+      // Pull the negotiated ATT MTU from the peer's GattSession now that a
+      // subscriber exists. The peripheral does not initiate MTU exchange on
+      // Windows; it waits for the central. This catches the post-exchange
+      // state and propagates it up through mtuChanged.
+      refreshNegotiatedMtuFromSubscribers();
     };
     tokSubscribedChangedStatus = pairingStatus.SubscribedClientsChanged(
         [this, updateSubscribers](wgap::GattLocalCharacteristic const &sender,
@@ -523,10 +573,13 @@ struct WinRtBlePeripheralBackend::Impl
       return;
     }
     try {
+      // MTU may finalise only after the first writes/notifies on some host
+      // stacks, so probe again here. Cheap and idempotent.
+      refreshNegotiatedMtuFromSubscribers();
       auto buf = qByteArrayToIBuffer(chunk);
       ch.NotifyValueAsync(buf).get();
-      LOG_DEBUG("WinRT: notify size=%d statusSubs=%d downSubs=%d",
-                chunk.size(), pairingStatusSubscribers.load(), downstreamSubscribers.load());
+      LOG_DEBUG("WinRT: notify size=%d mtu=%d statusSubs=%d downSubs=%d",
+                chunk.size(), mtu.load(), pairingStatusSubscribers.load(), downstreamSubscribers.load());
     } catch (const winrt::hresult_error &e) {
       LOG_WARN("WinRT: NotifyValueAsync threw hr=0x%08x size=%d",
                static_cast<unsigned>(e.code().value), chunk.size());
@@ -614,7 +667,7 @@ void WinRtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
 
 int WinRtBlePeripheralBackend::negotiatedMtu() const
 {
-  return m_impl ? m_impl->mtu.load() : 23;
+  return m_impl ? m_impl->mtu.load() : 512;
 }
 
 } // namespace deskflow::ble

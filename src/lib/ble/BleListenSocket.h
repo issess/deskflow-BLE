@@ -69,7 +69,9 @@ private:
   int m_attempts = 0;
   bool m_paired = false;
   BleSocket *m_acceptedSocket = nullptr;
-  int m_negotiatedMtu = 23;
+  // 0 means "not yet negotiated"; adoptPeripheralBackend then falls back to
+  // the modern BLE default (247) instead of the legacy 23-byte ATT MTU.
+  int m_negotiatedMtu = 0;
 };
 
 // Peripheral-mode listen socket.

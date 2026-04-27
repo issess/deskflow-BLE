@@ -188,7 +188,7 @@ void BlePeripheralContext::onPairingAuthWritten(const QByteArray &value)
 
   // Create and hand over the BleSocket.
   auto socket = std::make_unique<BleSocket>(m_owner->events());
-  socket->adoptPeripheralBackend(m_backend, m_negotiatedMtu > 0 ? m_negotiatedMtu : 247);
+  socket->adoptPeripheralBackend(m_backend, m_negotiatedMtu > 0 ? m_negotiatedMtu : 512);
   m_acceptedSocket = socket.get();
   m_owner->pushAcceptedSocket(std::move(socket));
   m_owner->events()->addEvent(Event(EventTypes::ListenSocketConnecting, m_owner->getEventTarget()));
