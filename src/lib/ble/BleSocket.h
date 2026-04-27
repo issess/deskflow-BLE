@@ -182,6 +182,8 @@ public:
 
 private:
   void sendEvent(int type); // EventTypes cast to int to avoid header churn
+  void scheduleInputReady();
+  void emitDeferredInputReady();
 
   IEventQueue *m_events;
   BleSocketContext *m_ctx;
@@ -192,6 +194,7 @@ private:
   bool m_inputShutdown = false;
   bool m_outputShutdown = false;
   bool m_connected = false;
+  bool m_inputReadyScheduled = false;
 };
 
 } // namespace deskflow::ble

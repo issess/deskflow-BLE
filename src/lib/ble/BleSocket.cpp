@@ -623,6 +623,7 @@ void BleSocket::adoptPeripheralService(QLowEnergyService *service, int mtu)
     m_outputShutdown = false;
     m_reader.reset();
     m_inputBuffer.clear();
+    m_inputReadyScheduled = false;
   }
   sendEvent(static_cast<int>(EventTypes::DataSocketConnected));
 }
@@ -637,6 +638,7 @@ void BleSocket::adoptPeripheralBackend(deskflow::ble::IBlePeripheralBackend *bac
     m_outputShutdown = false;
     m_reader.reset();
     m_inputBuffer.clear();
+    m_inputReadyScheduled = false;
   }
   sendEvent(static_cast<int>(EventTypes::DataSocketConnected));
 }
@@ -686,16 +688,35 @@ void BleSocket::deliverInbound(const QByteArray &chunk)
   }
   LOG_DEBUG("BleSocket::deliverInbound chunk=%d parsed=%d payloadBytes=%d bufNow=%d shutdown=%d hasData=%d",
             chunk.size(), payloadsParsed, totalPayloadBytes, bufSize, inputShutdown, hasData);
-  if (hasData) {
-    // Synchronously dispatch StreamInputReady on the same thread that
-    // received the BLE chunk. The default queued path adds a cond-var
-    // wakeup + main-loop round trip before the protocol layer (PSF +
-    // ServerProxy) sees the bytes — easily ~1 ms on a busy event loop.
-    // The handler runs PSF::readMore and the protocol dispatcher inline,
-    // which is safe here because we already released m_mutex above.
-    m_events->addEvent(
-        Event(EventTypes::StreamInputReady, getEventTarget(), nullptr, Event::EventFlags::DeliverImmediately));
+  if (hasData)
+    scheduleInputReady();
+}
+
+void BleSocket::scheduleInputReady()
+{
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_inputReadyScheduled || m_inputShutdown || m_inputBuffer.isEmpty())
+      return;
+    m_inputReadyScheduled = true;
   }
+
+  // Avoid dispatching StreamInputReady from inside the BLE receive callback.
+  // Returning to Qt first lets the host continue pumping pending BLE
+  // notify/write work; the protocol stack is woken once for all bytes
+  // accumulated in this event-loop turn.
+  QTimer::singleShot(0, m_ctx, [this] { emitDeferredInputReady(); });
+}
+
+void BleSocket::emitDeferredInputReady()
+{
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_inputReadyScheduled = false;
+    if (m_inputShutdown || m_inputBuffer.isEmpty())
+      return;
+  }
+  sendEvent(static_cast<int>(EventTypes::StreamInputReady));
 }
 
 void BleSocket::updateMtu(int mtu)
@@ -733,6 +754,7 @@ void BleSocket::notifyConnected()
     m_outputShutdown = false;
     m_reader.reset();
     m_inputBuffer.clear();
+    m_inputReadyScheduled = false;
   }
   sendEvent(static_cast<int>(EventTypes::DataSocketConnected));
 }
@@ -755,6 +777,7 @@ void BleSocket::close()
     m_outputShutdown = true;
     m_inputBuffer.clear();
     m_reader.reset();
+    m_inputReadyScheduled = false;
   }
   LOG_NOTE("BleSocket::close wasConnected=%d unread=%d", wasConnected, bufLeft);
   if (m_ctx)
@@ -866,6 +889,7 @@ void BleSocket::shutdownInput()
     m_inputShutdown = true;
     m_inputBuffer.clear();
     m_reader.reset();
+    m_inputReadyScheduled = false;
   }
   LOG_NOTE("BleSocket::shutdownInput discarded=%d", bufLeft);
   sendEvent(static_cast<int>(EventTypes::StreamInputShutdown));
