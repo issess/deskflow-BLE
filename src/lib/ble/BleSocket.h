@@ -101,7 +101,7 @@ private:
   BleSocket *m_owner;
   QPointer<QLowEnergyService> m_service;
   deskflow::ble::IBlePeripheralBackend *m_peripheralBackend = nullptr;
-  int m_mtu = 512; // default; lowered by mtuChanged when negotiated
+  int m_mtu = 64; // default; updated by mtuChanged when negotiated
 
   // Central-mode state.
   Role m_role = Role::None;

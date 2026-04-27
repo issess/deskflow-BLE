@@ -216,7 +216,7 @@ void BlePeripheralContext::acceptConnection(const char *reason)
   }
   LOG_NOTE("BLE: accepting BleSocket (%s)", reason);
   auto socket = std::make_unique<BleSocket>(m_owner->events());
-  socket->adoptPeripheralBackend(m_backend, m_negotiatedMtu > 0 ? m_negotiatedMtu : 512);
+  socket->adoptPeripheralBackend(m_backend, m_negotiatedMtu > 0 ? m_negotiatedMtu : 64);
   m_acceptedSocket = socket.get();
   m_owner->pushAcceptedSocket(std::move(socket));
   m_owner->events()->addEvent(Event(EventTypes::ListenSocketConnecting, m_owner->getEventTarget()));

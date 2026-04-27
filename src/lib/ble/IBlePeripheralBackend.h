@@ -44,10 +44,10 @@ public:
   // Push a DataDownstream chunk (already framed) to subscribed peer.
   virtual void sendDownstream(const QByteArray &chunk) = 0;
 
-  // Negotiated ATT MTU (defaults to 512 until a peer-specific value is known).
+  // Negotiated ATT MTU (defaults to 64 until a peer-specific value is known).
   virtual int negotiatedMtu() const
   {
-    return 512;
+    return 64;
   }
 
 Q_SIGNALS:

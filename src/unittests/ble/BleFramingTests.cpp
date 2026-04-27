@@ -43,7 +43,7 @@ void BleFramingTests::test_roundTrip_smallPayload()
 void BleFramingTests::test_roundTrip_boundaryMtu()
 {
   // ATT MTU - 3 typical values.
-  for (int chunk : {20, 100, 244, 512}) {
+  for (int chunk : {20, 64, 100, 244}) {
     // Exactly `chunk` bytes of payload — header + payload spans exactly two
     // chunks at chunk=20, more at others.
     const QByteArray in = makePayload(chunk);

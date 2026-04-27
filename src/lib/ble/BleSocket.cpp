@@ -23,6 +23,7 @@
 #include <QBluetoothUuid>
 #include <QCoreApplication>
 #include <QLowEnergyCharacteristic>
+#include <QLowEnergyConnectionParameters>
 #include <QLowEnergyController>
 #include <QLowEnergyDescriptor>
 #include <QLowEnergyService>
@@ -71,7 +72,7 @@ BleSocketContext::~BleSocketContext() = default;
 void BleSocketContext::attachPeripheral(QLowEnergyService *service, int mtu)
 {
   m_service = service;
-  m_mtu = mtu > 0 ? mtu : 512;
+  m_mtu = mtu > 0 ? mtu : 64;
   m_role = Role::Peripheral;
   if (!service)
     return;
@@ -83,7 +84,7 @@ void BleSocketContext::attachPeripheral(QLowEnergyService *service, int mtu)
 void BleSocketContext::attachPeripheralBackend(deskflow::ble::IBlePeripheralBackend *backend, int mtu)
 {
   m_peripheralBackend = backend;
-  m_mtu = mtu > 0 ? mtu : 512;
+  m_mtu = mtu > 0 ? mtu : 64;
   m_role = Role::Peripheral;
 }
 
@@ -284,14 +285,34 @@ void BleSocketContext::connectToCentralDevice(const QBluetoothDeviceInfo &info)
       LOG_DEBUG("BLE central MTU=%d", mtu);
     }
   });
+  QObject::connect(
+      m_centralCtl, &QLowEnergyController::connectionUpdated, this,
+      [](const QLowEnergyConnectionParameters &p) {
+        LOG_NOTE("BLE central: connection params updated min=%.2fms max=%.2fms latency=%d supervision=%dms",
+                 p.minimumInterval(), p.maximumInterval(), p.latency(), p.supervisionTimeout());
+      }
+  );
   m_centralCtl->connectToDevice();
 }
 
 void BleSocketContext::onCentralConnected()
 {
   LOG_NOTE("BLE central: TCP-less connection established, discovering services");
-  if (m_centralCtl)
+  if (m_centralCtl) {
+    // Ask the link layer for a short connection interval so notifications
+    // flush at HID-input cadence rather than the OS-default 30-50 ms. The
+    // peer is free to refuse or pick a value inside the requested range.
+    // Spec floor is 7.5 ms; values are in milliseconds with 1.25 ms grain.
+    // Latency 0 means the peripheral acks every event (lowest latency,
+    // higher power — acceptable for desktop hosts).
+    QLowEnergyConnectionParameters p;
+    p.setIntervalRange(7.5, 15.0);
+    p.setLatency(0);
+    p.setSupervisionTimeout(4000);
+    LOG_NOTE("BLE central: requesting connection interval 7.5-15ms latency=0 supervision=4000ms");
+    m_centralCtl->requestConnectionUpdate(p);
     m_centralCtl->discoverServices();
+  }
 }
 
 void BleSocketContext::onCentralDisconnected()

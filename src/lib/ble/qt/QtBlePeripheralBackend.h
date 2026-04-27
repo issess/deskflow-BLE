@@ -46,7 +46,7 @@ private:
   QPointer<QLowEnergyService> m_service;
   QString m_localName;
   QByteArray m_mfgPayload;
-  int m_mtu = 512;
+  int m_mtu = 64;
   int m_advRetry = 0;
   QTimer *m_advRetryTimer = nullptr;
   bool m_started = false;

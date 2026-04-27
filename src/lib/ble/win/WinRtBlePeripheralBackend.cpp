@@ -179,6 +179,12 @@ struct WinRtBlePeripheralBackend::Impl
   wadv::BluetoothLEAdvertisementPublisher mfgPublisher{nullptr};
   winrt::event_token tokMfgPublisherStatus{};
 
+  // Holds the result of BluetoothLEDevice::RequestPreferredConnectionParameters.
+  // Windows keeps the requested interval in effect only while this object is
+  // alive — releasing it reverts the link to default parameters. We grab one
+  // when the first central subscribes and drop it on disconnect.
+  wbt::BluetoothLEPreferredConnectionParametersRequest preferredConnReq{nullptr};
+
   winrt::event_token tokPairingAuthWrite{};
   winrt::event_token tokDataUpstreamWrite{};
   winrt::event_token tokAdvertisementStatusChanged{};
@@ -189,7 +195,7 @@ struct WinRtBlePeripheralBackend::Impl
   std::atomic<bool> starting{false};
   std::atomic<int> pairingStatusSubscribers{0};
   std::atomic<int> downstreamSubscribers{0};
-  std::atomic<int> mtu{512};
+  std::atomic<int> mtu{64};
   QString localName;
   QByteArray mfgPayload;
 
@@ -274,6 +280,67 @@ struct WinRtBlePeripheralBackend::Impl
     mtu.store(negotiated);
     LOG_NOTE("WinRT: MTU updated %d -> %d (from peer GattSession)", prev, negotiated);
     emitMtuChanged(negotiated);
+  }
+
+  // Ask the link layer for ThroughputOptimized connection params (short
+  // interval, no slave latency). The peer is free to refuse or pick a value
+  // inside its supported range. Windows keeps the request in effect only
+  // while the returned object stays alive, so we cache it on Impl. Best
+  // effort — failure leaves the OS-default interval in place.
+  void requestThroughputOptimizedConn()
+  {
+    if (preferredConnReq)
+      return; // already requested
+    try {
+      auto pickSession = [this]() -> wgap::GattSession {
+        for (auto &ch : {dataDownstream, pairingStatus}) {
+          if (!ch)
+            continue;
+          auto subs = ch.SubscribedClients();
+          for (uint32_t i = 0; i < subs.Size(); ++i) {
+            auto sub = subs.GetAt(i);
+            auto session = sub.Session();
+            if (session)
+              return session;
+          }
+        }
+        return wgap::GattSession{nullptr};
+      };
+      auto session = pickSession();
+      if (!session) {
+        LOG_DEBUG("WinRT: requestThroughputOptimizedConn — no session yet");
+        return;
+      }
+      auto deviceId = session.DeviceId();
+      auto device = wbt::BluetoothLEDevice::FromIdAsync(deviceId.Id()).get();
+      if (!device) {
+        LOG_WARN("WinRT: BluetoothLEDevice::FromIdAsync returned null for connection-params");
+        return;
+      }
+      auto params = wbt::BluetoothLEPreferredConnectionParameters::ThroughputOptimized();
+      preferredConnReq = device.RequestPreferredConnectionParameters(params);
+      const int status = preferredConnReq
+                             ? static_cast<int>(preferredConnReq.Status())
+                             : -1;
+      LOG_NOTE("WinRT: requested ThroughputOptimized connection params; status=%d "
+               "(0=Success 1=PartialFailure 2=Disabled 3=DisabledByPolicy 4=DisabledForPeer)",
+               status);
+    } catch (const winrt::hresult_error &e) {
+      LOG_WARN("WinRT: RequestPreferredConnectionParameters threw hr=0x%08x msg=%ls",
+               static_cast<unsigned>(e.code().value), e.message().c_str());
+    } catch (const std::exception &e) {
+      LOG_WARN("WinRT: RequestPreferredConnectionParameters threw std::exception: %s", e.what());
+    } catch (...) {
+      LOG_WARN("WinRT: RequestPreferredConnectionParameters threw unknown exception");
+    }
+  }
+
+  void releasePreferredConnRequest()
+  {
+    if (!preferredConnReq)
+      return;
+    preferredConnReq = nullptr;
+    LOG_NOTE("WinRT: released preferred connection params request (link reverts to default)");
   }
 
   // Runs on the worker (MTA) thread.
@@ -584,9 +651,14 @@ struct WinRtBlePeripheralBackend::Impl
       if (prevTotal == 0 && total > 0) {
         LOG_NOTE("WinRT: emitCentralConnected (prevTotal=0 -> total=%d)", total);
         emitCentralConnected();
+        // Defer the connection-params request to the worker thread so all
+        // BluetoothLEDevice / GattSession touches happen on a single MTA
+        // pump and never race the notify path.
+        worker.post([this] { requestThroughputOptimizedConn(); });
       } else if (prevTotal > 0 && total == 0) {
         LOG_NOTE("WinRT: emitCentralDisconnected (prevTotal=%d -> total=0)", prevTotal);
         emitCentralDisconnected();
+        worker.post([this] { releasePreferredConnRequest(); });
       }
       // Pull the negotiated ATT MTU from the peer's GattSession now that a
       // subscriber exists. The peripheral does not initiate MTU exchange on
@@ -628,6 +700,7 @@ struct WinRtBlePeripheralBackend::Impl
   void workerStop()
   {
     LOG_NOTE("WinRT: workerStop");
+    releasePreferredConnRequest();
     stopManufacturerDataAdvertiser();
     try {
       if (serviceProvider) {
@@ -812,6 +885,7 @@ void WinRtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
   bool needPump = false;
   size_t dropped = 0;
   size_t coalescedMouse = 0;
+  size_t depthAfter = 0;
   {
     std::lock_guard<std::mutex> lock(m_impl->dsMu);
     if (isMouseMoveBleChunk(chunk))
@@ -822,6 +896,7 @@ void WinRtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
         break;
       ++dropped;
     }
+    depthAfter = m_impl->dsQueue.size();
     if (!m_impl->dsPumpScheduled) {
       m_impl->dsPumpScheduled = true;
       needPump = true;
@@ -829,8 +904,8 @@ void WinRtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
   }
   if (coalescedMouse) {
     const auto total = m_impl->dsCoalescedMouseTotal.fetch_add(coalescedMouse) + coalescedMouse;
-    LOG_DEBUG("WinRT: downstream coalesced %zu pending mouse chunk(s), total=%llu",
-              coalescedMouse, static_cast<unsigned long long>(total));
+    LOG_DEBUG("WinRT: downstream coalesced %zu pending mouse chunk(s), depth=%zu lifetimeTotal=%llu",
+              coalescedMouse, depthAfter, static_cast<unsigned long long>(total));
   }
   if (dropped) {
     const auto total = m_impl->dsDroppedTotal.fetch_add(dropped) + dropped;
@@ -859,7 +934,7 @@ void WinRtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
 
 int WinRtBlePeripheralBackend::negotiatedMtu() const
 {
-  return m_impl ? m_impl->mtu.load() : 512;
+  return m_impl ? m_impl->mtu.load() : 64;
 }
 
 } // namespace deskflow::ble

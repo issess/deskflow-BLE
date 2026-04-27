@@ -112,7 +112,7 @@ bool QtBlePeripheralBackend::start(const QString &localName, const QByteArray &m
   QObject::connect(m_controller, &QLowEnergyController::disconnected, this,
                    [this] { Q_EMIT centralDisconnected(); });
   QObject::connect(m_controller, &QLowEnergyController::mtuChanged, this, [this](int mtu) {
-    m_mtu = mtu > 0 ? mtu : 512;
+    m_mtu = mtu > 0 ? mtu : 64;
     Q_EMIT mtuChanged(m_mtu);
   });
   QObject::connect(m_controller,
