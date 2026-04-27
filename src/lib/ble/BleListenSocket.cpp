@@ -197,18 +197,20 @@ void BlePeripheralContext::onPairingAuthWritten(const QByteArray &value)
 
 void BlePeripheralContext::onUpstreamWritten(const QByteArray &value)
 {
+  LOG_DEBUG("BlePeripheralContext::onUpstreamWritten size=%d acceptedSocket=%p",
+            value.size(), (void *)m_acceptedSocket);
   if (m_acceptedSocket)
     m_acceptedSocket->deliverInbound(value);
 }
 
 void BlePeripheralContext::onCentralConnected()
 {
-  LOG_NOTE("BLE central subscribed");
+  LOG_NOTE("BLE central subscribed (peripheral side notified)");
 }
 
 void BlePeripheralContext::onCentralDisconnected()
 {
-  LOG_NOTE("BLE central unsubscribed");
+  LOG_NOTE("BLE central unsubscribed acceptedSocket=%p", (void *)m_acceptedSocket);
   if (m_acceptedSocket) {
     m_acceptedSocket->notifyDisconnected();
     m_acceptedSocket = nullptr;

@@ -390,6 +390,8 @@ void BleSocketContext::enqueueOutbound(QByteArray payload)
 {
   const int chunkSize = std::max(1, m_mtu - 3);
   auto chunks = BleFramingWriter::frame(payload, chunkSize);
+  LOG_DEBUG("BleSocketContext::enqueueOutbound role=%d payload=%d mtu=%d chunks=%zu",
+            static_cast<int>(m_role), payload.size(), m_mtu, chunks.size());
 
   // Peripheral mode via new backend abstraction.
   if (m_role == Role::Peripheral && m_peripheralBackend) {
@@ -401,16 +403,13 @@ void BleSocketContext::enqueueOutbound(QByteArray payload)
   if (!m_service)
     return;
   if (m_role == Role::Central) {
-    if (chunks.size() == 1 && !m_centralWriteInFlight && m_centralWriteQueue.isEmpty()) {
-      auto ch = m_service->characteristic(kDataUpstreamCharUuid);
-      if (!ch.isValid()) {
-        LOG_WARN("BLE central: DataUpstream characteristic not valid, dropping %d bytes", payload.size());
-        return;
-      }
-      LOG_DEBUG("BLE central: writing upstream single chunk without response len=%d", chunks.front().size());
-      m_service->writeCharacteristic(ch, chunks.front(), QLowEnergyService::WriteWithoutResponse);
-      return;
-    }
+    // Always go through the WriteWithResponse queue. WriteWithoutResponse is
+    // fire-and-forget at the BLE link layer and silently drops chunks when the
+    // host controller buffer is full or signal degrades briefly. PSF splits a
+    // logical message into separate length-prefix and payload write() calls,
+    // so a single dropped chunk permanently misaligns the input stream and
+    // surfaces later as a bogus 32-bit length (e.g. ASCII "CALV" interpreted
+    // as length 0x43414C56). WithResponse uses link-layer ACK + retry.
     for (const auto &c : chunks)
       m_centralWriteQueue.enqueue(c);
     drainCentralWriteQueue();
@@ -551,17 +550,29 @@ void BleSocket::adoptPeripheralBackend(deskflow::ble::IBlePeripheralBackend *bac
 void BleSocket::deliverInbound(const QByteArray &chunk)
 {
   bool hasData = false;
+  int payloadsParsed = 0;
+  int totalPayloadBytes = 0;
+  int bufSize = 0;
+  bool inputShutdown = false;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_inputShutdown)
+    if (m_inputShutdown) {
+      LOG_WARN("BleSocket::deliverInbound dropped %d bytes (input shutdown)", chunk.size());
       return;
+    }
     m_reader.feed(chunk);
     QByteArray payload;
     while (m_reader.next(payload)) {
       m_inputBuffer.append(payload);
+      totalPayloadBytes += payload.size();
+      ++payloadsParsed;
       hasData = true;
     }
+    bufSize = m_inputBuffer.size();
+    inputShutdown = m_inputShutdown;
   }
+  LOG_DEBUG("BleSocket::deliverInbound chunk=%d parsed=%d payloadBytes=%d bufNow=%d shutdown=%d hasData=%d",
+            chunk.size(), payloadsParsed, totalPayloadBytes, bufSize, inputShutdown, hasData);
   if (hasData)
     sendEvent(static_cast<int>(EventTypes::StreamInputReady));
 }
@@ -575,11 +586,19 @@ void BleSocket::updateMtu(int mtu)
 void BleSocket::notifyDisconnected()
 {
   bool wasConnected;
+  int bufLeft = 0;
+  bool inShut = false;
+  bool outShut = false;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
     wasConnected = m_connected;
     m_connected = false;
+    bufLeft = m_inputBuffer.size();
+    inShut = m_inputShutdown;
+    outShut = m_outputShutdown;
   }
+  LOG_NOTE("BleSocket::notifyDisconnected wasConnected=%d unread=%d inShut=%d outShut=%d",
+           wasConnected, bufLeft, inShut, outShut);
   if (wasConnected)
     sendEvent(static_cast<int>(EventTypes::SocketDisconnected));
 }
@@ -605,15 +624,18 @@ void BleSocket::bind(const NetworkAddress &)
 void BleSocket::close()
 {
   bool wasConnected;
+  int bufLeft = 0;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
     wasConnected = m_connected;
+    bufLeft = m_inputBuffer.size();
     m_connected = false;
     m_inputShutdown = true;
     m_outputShutdown = true;
     m_inputBuffer.clear();
     m_reader.reset();
   }
+  LOG_NOTE("BleSocket::close wasConnected=%d unread=%d", wasConnected, bufLeft);
   if (m_ctx)
     m_ctx->detach();
   if (wasConnected)
@@ -695,6 +717,7 @@ void BleSocket::write(const void *buffer, uint32_t n)
       return;
     }
   }
+  LOG_DEBUG("BleSocket::write n=%u", n);
   QByteArray payload(reinterpret_cast<const char *>(buffer), static_cast<int>(n));
   // Hop to the Qt thread that owns the controller before touching the service.
   QMetaObject::invokeMethod(
@@ -710,12 +733,15 @@ void BleSocket::flush()
 
 void BleSocket::shutdownInput()
 {
+  int bufLeft = 0;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
+    bufLeft = m_inputBuffer.size();
     m_inputShutdown = true;
     m_inputBuffer.clear();
     m_reader.reset();
   }
+  LOG_NOTE("BleSocket::shutdownInput discarded=%d", bufLeft);
   sendEvent(static_cast<int>(EventTypes::StreamInputShutdown));
 }
 
@@ -725,6 +751,7 @@ void BleSocket::shutdownOutput()
     std::lock_guard<std::mutex> lock(m_mutex);
     m_outputShutdown = true;
   }
+  LOG_NOTE("BleSocket::shutdownOutput");
   sendEvent(static_cast<int>(EventTypes::StreamOutputShutdown));
 }
 

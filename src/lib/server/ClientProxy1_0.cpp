@@ -27,15 +27,19 @@ ClientProxy1_0::ClientProxy1_0(const std::string &name, deskflow::IStream *strea
   // install event handlers
   m_events->addHandler(EventTypes::StreamInputReady, stream->getEventTarget(), [this](const auto &) { handleData(); });
   m_events->addHandler(EventTypes::StreamOutputError, stream->getEventTarget(), [this](const auto &) {
+    LOG_DEBUG("ClientProxy1_0(%s): StreamOutputError -> writeError", getName().c_str());
     handleWriteError();
   });
   m_events->addHandler(EventTypes::StreamInputShutdown, stream->getEventTarget(), [this](const auto &) {
+    LOG_DEBUG("ClientProxy1_0(%s): StreamInputShutdown -> disconnect", getName().c_str());
     handleDisconnect();
   });
   m_events->addHandler(EventTypes::StreamInputFormatError, stream->getEventTarget(), [this](const auto &) {
+    LOG_DEBUG("ClientProxy1_0(%s): StreamInputFormatError -> disconnect", getName().c_str());
     handleDisconnect();
   });
   m_events->addHandler(EventTypes::StreamOutputShutdown, stream->getEventTarget(), [this](const auto &) {
+    LOG_DEBUG("ClientProxy1_0(%s): StreamOutputShutdown -> writeError", getName().c_str());
     handleWriteError();
   });
   m_events->addHandler(EventTypes::Timer, this, [this](const auto &) { handleFlatline(); });

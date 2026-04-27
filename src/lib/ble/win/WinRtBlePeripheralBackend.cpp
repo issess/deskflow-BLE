@@ -445,10 +445,13 @@ struct WinRtBlePeripheralBackend::Impl
       counter.store(n);
       const int total = pairingStatusSubscribers.load() + downstreamSubscribers.load();
       LOG_NOTE("WinRT: %s subscribed clients count = %d total=%d", label, n, total);
-      if (prevTotal == 0 && total > 0)
+      if (prevTotal == 0 && total > 0) {
+        LOG_NOTE("WinRT: emitCentralConnected (prevTotal=0 -> total=%d)", total);
         emitCentralConnected();
-      else if (prevTotal > 0 && total == 0)
+      } else if (prevTotal > 0 && total == 0) {
+        LOG_NOTE("WinRT: emitCentralDisconnected (prevTotal=%d -> total=0)", prevTotal);
         emitCentralDisconnected();
+      }
     };
     tokSubscribedChangedStatus = pairingStatus.SubscribedClientsChanged(
         [this, updateSubscribers](wgap::GattLocalCharacteristic const &sender,
@@ -515,16 +518,20 @@ struct WinRtBlePeripheralBackend::Impl
 
   void workerNotify(wgap::GattLocalCharacteristic &ch, const QByteArray &chunk)
   {
-    if (!ch)
+    if (!ch) {
+      LOG_WARN("WinRT: workerNotify dropped %d bytes (characteristic null)", chunk.size());
       return;
+    }
     try {
       auto buf = qByteArrayToIBuffer(chunk);
       ch.NotifyValueAsync(buf).get();
+      LOG_DEBUG("WinRT: notify size=%d statusSubs=%d downSubs=%d",
+                chunk.size(), pairingStatusSubscribers.load(), downstreamSubscribers.load());
     } catch (const winrt::hresult_error &e) {
-      LOG_WARN("WinRT: NotifyValueAsync threw hr=0x%08x",
-               static_cast<unsigned>(e.code().value));
+      LOG_WARN("WinRT: NotifyValueAsync threw hr=0x%08x size=%d",
+               static_cast<unsigned>(e.code().value), chunk.size());
     } catch (const std::exception &e) {
-      LOG_WARN("WinRT: NotifyValueAsync threw std::exception: %s", e.what());
+      LOG_WARN("WinRT: NotifyValueAsync threw std::exception: %s size=%d", e.what(), chunk.size());
     }
   }
 };

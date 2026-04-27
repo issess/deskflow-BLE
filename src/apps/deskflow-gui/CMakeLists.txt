@@ -67,6 +67,8 @@ if(WIN32)
 
   set(QT_DEPENDS_DIR ${CMAKE_BINARY_DIR}/qt-depends)
 
+  file(WRITE "${QT_DEPENDS_DIR}/qt.conf" "[Paths]\nPlugins=plugins\n")
+
   add_custom_command(
     TARGET ${target} POST_BUILD
     COMMAND ${DEPLOYQT}

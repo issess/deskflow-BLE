@@ -7,6 +7,7 @@
 
 #include "deskflow/PacketStreamFilter.h"
 #include "base/IEventQueue.h"
+#include "base/Log.h"
 #include "deskflow/ProtocolTypes.h"
 
 #include <cstring>
@@ -116,6 +117,8 @@ bool PacketStreamFilter::readPacketSize()
     m_size =
         ((uint32_t)buffer[0] << 24) | ((uint32_t)buffer[1] << 16) | ((uint32_t)buffer[2] << 8) | (uint32_t)buffer[3];
     if (m_size > PROTOCOL_MAX_MESSAGE_LENGTH) {
+      LOG_WARN("PSF: packet length %u exceeds limit %u — emitting StreamInputFormatError",
+               m_size, static_cast<uint32_t>(PROTOCOL_MAX_MESSAGE_LENGTH));
       m_events->addEvent(Event(EventTypes::StreamInputFormatError, getEventTarget()));
       return false;
     }
@@ -160,6 +163,7 @@ void PacketStreamFilter::filterEvent(const Event &event)
       return;
     }
   } else if (event.getType() == EventTypes::StreamInputShutdown) {
+    LOG_DEBUG("PSF: received StreamInputShutdown from inner stream");
     // discard this if we have buffered data
     std::scoped_lock lock{m_mutex};
     m_inputShutdown = true;

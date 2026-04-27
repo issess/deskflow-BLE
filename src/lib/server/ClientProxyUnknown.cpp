@@ -91,15 +91,19 @@ void ClientProxyUnknown::addStreamHandlers()
     handleData();
   });
   m_events->addHandler(EventTypes::StreamOutputError, m_stream->getEventTarget(), [this](const auto &) {
+    LOG_DEBUG("ClientProxyUnknown: StreamOutputError -> writeError");
     handleWriteError();
   });
   m_events->addHandler(EventTypes::StreamInputShutdown, m_stream->getEventTarget(), [this](const auto &) {
+    LOG_DEBUG("ClientProxyUnknown: StreamInputShutdown -> disconnect");
     handleDisconnect();
   });
   m_events->addHandler(EventTypes::StreamInputFormatError, m_stream->getEventTarget(), [this](const auto &) {
+    LOG_DEBUG("ClientProxyUnknown: StreamInputFormatError -> disconnect");
     handleDisconnect();
   });
   m_events->addHandler(EventTypes::StreamOutputShutdown, m_stream->getEventTarget(), [this](const auto &) {
+    LOG_DEBUG("ClientProxyUnknown: StreamOutputShutdown -> writeError");
     handleWriteError();
   });
 }
@@ -109,7 +113,10 @@ void ClientProxyUnknown::addProxyHandlers()
   assert(m_proxy != nullptr);
 
   m_events->addHandler(EventTypes::ClientProxyReady, m_proxy, [this](const auto &) { sendSuccess(); });
-  m_events->addHandler(EventTypes::ClientProxyDisconnected, m_proxy, [this](const auto &) { handleDisconnect(); });
+  m_events->addHandler(EventTypes::ClientProxyDisconnected, m_proxy, [this](const auto &) {
+    LOG_DEBUG("ClientProxyUnknown: ClientProxyDisconnected -> disconnect");
+    handleDisconnect();
+  });
 }
 
 void ClientProxyUnknown::removeHandlers()
