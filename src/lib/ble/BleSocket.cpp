@@ -27,6 +27,7 @@
 #include <QLowEnergyController>
 #include <QLowEnergyDescriptor>
 #include <QLowEnergyService>
+#include <QTimer>
 #include <QMetaObject>
 #include <QThread>
 #include <Qt>
@@ -381,16 +382,15 @@ void BleSocketContext::enableNotifications()
     return;
   const QBluetoothUuid cccdUuid(QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration);
   // CCCD value selects notify (0x0001) vs indicate (0x0002).
-  // DataDownstream is the bulk data path; the peripheral sends it as GATT
-  // Indicate so each chunk is ACK'd at the link layer. The other two are
-  // single-byte status / control channels where Notify is fine.
+  // All three subscribed characteristics use Notify; reliability is
+  // recovered at the application layer via BleFraming packet IDs.
   struct Target {
     QBluetoothUuid uuid;
     const char *cccd;
   };
   const Target targets[] = {
       {kPairingStatusCharUuid, "0100"},
-      {kDataDownstreamCharUuid, "0200"},
+      {kDataDownstreamCharUuid, "0100"},
       {kControlCharUuid, "0100"},
   };
   for (const auto &t : targets) {
@@ -470,14 +470,15 @@ void BleSocketContext::detach()
 
 void BleSocketContext::enqueueOutbound(QByteArray payload)
 {
-  const int chunkSize = std::max(1, m_mtu - 3);
-  auto chunks = BleFramingWriter::frame(payload, chunkSize);
-  LOG_DEBUG("BleSocketContext::enqueueOutbound role=%d payload=%d mtu=%d chunks=%zu",
-            static_cast<int>(m_role), payload.size(), m_mtu, chunks.size());
+  const int chunkSize = std::max(BleFramingWriter::kHeaderSize + 1, m_mtu - 3);
+  auto frame = m_framingWriter.frame(payload, chunkSize);
+  LOG_DEBUG("BleSocketContext::enqueueOutbound role=%d payload=%d mtu=%d chunks=%zu packetId=%u",
+            static_cast<int>(m_role), payload.size(), m_mtu, frame.chunks.size(),
+            static_cast<unsigned>(frame.packetId));
 
   // Peripheral mode via new backend abstraction.
   if (m_role == Role::Peripheral && m_peripheralBackend) {
-    for (const auto &c : chunks)
+    for (const auto &c : frame.chunks)
       m_peripheralBackend->sendDownstream(c);
     return;
   }
@@ -485,14 +486,12 @@ void BleSocketContext::enqueueOutbound(QByteArray payload)
   if (!m_service)
     return;
   if (m_role == Role::Central) {
-    // Always go through the WriteWithResponse queue. WriteWithoutResponse is
-    // fire-and-forget at the BLE link layer and silently drops chunks when the
-    // host controller buffer is full or signal degrades briefly. PSF splits a
-    // logical message into separate length-prefix and payload write() calls,
-    // so a single dropped chunk permanently misaligns the input stream and
-    // surfaces later as a bogus 32-bit length (e.g. ASCII "CALV" interpreted
-    // as length 0x43414C56). WithResponse uses link-layer ACK + retry.
-    for (const auto &c : chunks)
+    // Fire-and-forget. Each chunk carries a packet ID; the host's
+    // BleFramingReader detects loss via id-gap and discards any in-progress
+    // frame to keep the upper-layer (PSF) stream from desyncing. This trades
+    // a small per-frame drop rate under RF stress for ~10× lower per-write
+    // latency vs WriteWithResponse.
+    for (const auto &c : frame.chunks)
       m_centralWriteQueue.enqueue(c);
     drainCentralWriteQueue();
     return;
@@ -505,13 +504,13 @@ void BleSocketContext::enqueueOutbound(QByteArray payload)
     LOG_WARN("BLE: outgoing characteristic not valid, dropping %d bytes", payload.size());
     return;
   }
-  for (const auto &c : chunks)
+  for (const auto &c : frame.chunks)
     m_service->writeCharacteristic(ch, c);
 }
 
 void BleSocketContext::drainCentralWriteQueue()
 {
-  if (m_role != Role::Central || m_centralWriteInFlight || !m_service || m_centralWriteQueue.isEmpty())
+  if (m_role != Role::Central || !m_service || m_centralWriteQueue.isEmpty())
     return;
   auto ch = m_service->characteristic(kDataUpstreamCharUuid);
   if (!ch.isValid()) {
@@ -520,10 +519,23 @@ void BleSocketContext::drainCentralWriteQueue()
     m_centralWriteQueue.clear();
     return;
   }
-  const QByteArray chunk = m_centralWriteQueue.dequeue();
-  m_centralWriteInFlight = true;
-  LOG_DEBUG("BLE central: writing upstream chunk len=%d queued=%d", chunk.size(), m_centralWriteQueue.size());
-  m_service->writeCharacteristic(ch, chunk, QLowEnergyService::WriteWithResponse);
+  // Burst-drain. WriteWithoutResponse doesn't reliably fire
+  // characteristicWritten on Qt 6 / Windows, so we can't gate on per-write
+  // confirmation. Cap each burst to keep the OS BLE buffer from overflowing
+  // and yield via QTimer::singleShot(0) between bursts so the event loop
+  // can pump notifications and other Qt work between bursts.
+  constexpr int kBurstChunks = 4;
+  int sent = 0;
+  while (sent < kBurstChunks && !m_centralWriteQueue.isEmpty()) {
+    const QByteArray chunk = m_centralWriteQueue.dequeue();
+    LOG_DEBUG("BLE central: writing upstream chunk len=%d queued=%d", chunk.size(), m_centralWriteQueue.size());
+    m_service->writeCharacteristic(ch, chunk, QLowEnergyService::WriteWithoutResponse);
+    ++sent;
+  }
+  if (!m_centralWriteQueue.isEmpty()) {
+    QTimer::singleShot(0, this, &BleSocketContext::drainCentralWriteQueue);
+  }
+  m_centralWriteInFlight = false; // gate retained for source compat; not used
 }
 
 void BleSocketContext::onCharacteristicWritten(const QLowEnergyCharacteristic &ch, const QByteArray &value)
@@ -642,7 +654,26 @@ void BleSocket::deliverInbound(const QByteArray &chunk)
       LOG_WARN("BleSocket::deliverInbound dropped %d bytes (input shutdown)", chunk.size());
       return;
     }
-    m_reader.feed(chunk);
+    const auto res = m_reader.feedChunk(chunk);
+    switch (res) {
+    case BleFramingReader::FeedResult::DroppedStale:
+      LOG_DEBUG("BLE: dropped stale chunk (lastId=%u, droppedStale=%llu)",
+                static_cast<unsigned>(m_reader.lastAcceptedId()),
+                static_cast<unsigned long long>(m_reader.framesDroppedStale()));
+      break;
+    case BleFramingReader::FeedResult::DroppedGap:
+      LOG_WARN("BLE: dropped gap chunk (gapEvents=%llu droppedGap=%llu)",
+               static_cast<unsigned long long>(m_reader.gapEvents()),
+               static_cast<unsigned long long>(m_reader.framesDroppedGap()));
+      break;
+    case BleFramingReader::FeedResult::GapResync:
+      LOG_WARN("BLE: gap detected, resynced at id=%u (gapEvents=%llu)",
+               static_cast<unsigned>(m_reader.lastAcceptedId()),
+               static_cast<unsigned long long>(m_reader.gapEvents()));
+      break;
+    case BleFramingReader::FeedResult::Accepted:
+      break;
+    }
     QByteArray payload;
     while (m_reader.next(payload)) {
       m_inputBuffer.append(payload);

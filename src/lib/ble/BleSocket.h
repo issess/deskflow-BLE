@@ -102,6 +102,9 @@ private:
   QPointer<QLowEnergyService> m_service;
   deskflow::ble::IBlePeripheralBackend *m_peripheralBackend = nullptr;
   int m_mtu = 64; // default; updated by mtuChanged when negotiated
+  // Per-direction packet-id source for outbound BLE chunks. Each
+  // BleSocketContext is wired to exactly one outbound direction.
+  BleFramingWriter m_framingWriter;
 
   // Central-mode state.
   Role m_role = Role::None;

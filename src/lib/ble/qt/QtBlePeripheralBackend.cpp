@@ -76,10 +76,11 @@ bool QtBlePeripheralBackend::start(const QString &localName, const QByteArray &m
 
   QLowEnergyCharacteristicData dataDownstream;
   dataDownstream.setUuid(kDataDownstreamCharUuid);
-  // Indicate (ACK'd) instead of Notify (best-effort) so PSF framing on
-  // the central side cannot be permanently desynced by a single dropped
-  // chunk during a burst.
-  dataDownstream.setProperties(QLowEnergyCharacteristic::Indicate);
+  // Notify (fire-and-forget). Loss is detected and resynced at the
+  // application layer via BleFraming packet IDs (BleFramingReader::feedChunk
+  // drops stale chunks and discards in-progress assembly on an id-gap), so
+  // a dropped chunk costs one logical frame instead of desyncing PSF.
+  dataDownstream.setProperties(QLowEnergyCharacteristic::Notify);
   dataDownstream.setValue(oneZero);
   dataDownstream.setValueLength(1, 244);
 
