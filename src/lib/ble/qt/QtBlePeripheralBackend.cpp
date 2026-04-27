@@ -76,7 +76,10 @@ bool QtBlePeripheralBackend::start(const QString &localName, const QByteArray &m
 
   QLowEnergyCharacteristicData dataDownstream;
   dataDownstream.setUuid(kDataDownstreamCharUuid);
-  dataDownstream.setProperties(QLowEnergyCharacteristic::Notify);
+  // Indicate (ACK'd) instead of Notify (best-effort) so PSF framing on
+  // the central side cannot be permanently desynced by a single dropped
+  // chunk during a burst.
+  dataDownstream.setProperties(QLowEnergyCharacteristic::Indicate);
   dataDownstream.setValue(oneZero);
   dataDownstream.setValueLength(1, 244);
 

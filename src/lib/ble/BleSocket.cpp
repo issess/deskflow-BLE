@@ -348,15 +348,27 @@ void BleSocketContext::enableNotifications()
   if (!m_service)
     return;
   const QBluetoothUuid cccdUuid(QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration);
-  const QBluetoothUuid targets[] = {kPairingStatusCharUuid, kDataDownstreamCharUuid, kControlCharUuid};
-  for (const auto &uuid : targets) {
-    auto ch = m_service->characteristic(uuid);
+  // CCCD value selects notify (0x0001) vs indicate (0x0002).
+  // DataDownstream is the bulk data path; the peripheral sends it as GATT
+  // Indicate so each chunk is ACK'd at the link layer. The other two are
+  // single-byte status / control channels where Notify is fine.
+  struct Target {
+    QBluetoothUuid uuid;
+    const char *cccd;
+  };
+  const Target targets[] = {
+      {kPairingStatusCharUuid, "0100"},
+      {kDataDownstreamCharUuid, "0200"},
+      {kControlCharUuid, "0100"},
+  };
+  for (const auto &t : targets) {
+    auto ch = m_service->characteristic(t.uuid);
     if (!ch.isValid())
       continue;
     auto desc = ch.descriptor(cccdUuid);
     if (!desc.isValid())
       continue;
-    m_service->writeDescriptor(desc, QByteArray::fromHex("0100"));
+    m_service->writeDescriptor(desc, QByteArray::fromHex(t.cccd));
   }
 }
 

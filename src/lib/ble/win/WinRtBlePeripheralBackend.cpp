@@ -337,7 +337,12 @@ struct WinRtBlePeripheralBackend::Impl
       emitStartFailed(QStringLiteral("PairingStatus characteristic create failed"));
       return false;
     }
-    if (!addChar(kDataDownstreamCharUuid, wgap::GattCharacteristicProperties::Notify,
+    // DataDownstream uses GATT Indicate (not Notify): every chunk is
+    // ACK'd at the link layer with retry-on-failure. Notifications are
+    // best-effort and silently drop on busy connections, which orphans
+    // the central's PSF parser mid-frame and stalls the protocol stream
+    // until the heartbeat flatline kills the session.
+    if (!addChar(kDataDownstreamCharUuid, wgap::GattCharacteristicProperties::Indicate,
                  "DataDownstream", dataDownstream)) {
       emitStartFailed(QStringLiteral("DataDownstream characteristic create failed"));
       return false;
