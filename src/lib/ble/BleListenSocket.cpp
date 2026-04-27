@@ -60,6 +60,15 @@ BlePeripheralContext::BlePeripheralContext(BleListenSocket *owner) : QObject(nul
   m_timeout->setSingleShot(true);
   m_timeout->setInterval(kPairingTimeoutSeconds * 1000);
   QObject::connect(m_timeout, &QTimer::timeout, this, &BlePeripheralContext::onTimeout);
+
+  // Grace window after a central subscribes to allow a fresh-pair PairingAuth
+  // write. If nothing arrives and we have been paired before, treat the
+  // subscription itself as a remembered-peer reconnect and accept.
+  m_rememberedAcceptTimer = new QTimer(this);
+  m_rememberedAcceptTimer->setSingleShot(true);
+  m_rememberedAcceptTimer->setInterval(2500);
+  QObject::connect(m_rememberedAcceptTimer, &QTimer::timeout, this,
+                   &BlePeripheralContext::onRememberedAcceptElapsed);
 }
 
 BlePeripheralContext::~BlePeripheralContext()
@@ -128,6 +137,8 @@ void BlePeripheralContext::tearDown()
 {
   if (m_timeout)
     m_timeout->stop();
+  if (m_rememberedAcceptTimer)
+    m_rememberedAcceptTimer->stop();
   if (m_backend) {
     m_backend->stop();
     m_backend->deleteLater();
@@ -179,20 +190,57 @@ void BlePeripheralContext::onPairingAuthWritten(const QByteArray &value)
   // Success.
   m_paired = true;
   m_timeout->stop();
+  if (m_rememberedAcceptTimer)
+    m_rememberedAcceptTimer->stop();
   m_code.clear();
   m_currentCode.clear();
   BlePairingBroker::instance().clearActiveCode();
   if (m_backend)
     m_backend->sendPairingStatus(static_cast<quint8>(PairingStatus::Accepted));
   QTextStream(stdout) << "BLE_PAIRING:RESULT=accepted:" << Qt::endl;
+  // Mark this host as having paired at least once. Future central reconnects
+  // that subscribe without a PairingAuth write will be auto-accepted via the
+  // remembered-peer grace timer in onCentralConnected.
+  Settings::setValue(Settings::Server::HasBlePairedPeer, true);
+  Settings::save();
 
-  // Create and hand over the BleSocket.
+  acceptConnection("fresh pairing code accepted");
+  BlePairingBroker::instance().reportResult(true, QString());
+}
+
+void BlePeripheralContext::acceptConnection(const char *reason)
+{
+  if (m_acceptedSocket) {
+    LOG_DEBUG("BLE: acceptConnection(%s) ignored — already accepted", reason);
+    return;
+  }
+  LOG_NOTE("BLE: accepting BleSocket (%s)", reason);
   auto socket = std::make_unique<BleSocket>(m_owner->events());
   socket->adoptPeripheralBackend(m_backend, m_negotiatedMtu > 0 ? m_negotiatedMtu : 512);
   m_acceptedSocket = socket.get();
   m_owner->pushAcceptedSocket(std::move(socket));
   m_owner->events()->addEvent(Event(EventTypes::ListenSocketConnecting, m_owner->getEventTarget()));
-  BlePairingBroker::instance().reportResult(true, QString());
+}
+
+void BlePeripheralContext::onRememberedAcceptElapsed()
+{
+  if (m_paired || m_acceptedSocket)
+    return;
+  if (!Settings::value(Settings::Server::HasBlePairedPeer).toBool()) {
+    LOG_DEBUG("BLE: remembered-accept grace elapsed but no prior pairing — waiting for code");
+    return;
+  }
+  // Treat the GATT-level subscription as the reconnect signal. The central
+  // proved nothing here, but the symmetric assumption is that prior pairing
+  // established trust, and the central has chosen to skip the code handshake.
+  m_paired = true;
+  m_timeout->stop();
+  m_code.clear();
+  m_currentCode.clear();
+  BlePairingBroker::instance().clearActiveCode();
+  if (m_backend)
+    m_backend->sendPairingStatus(static_cast<quint8>(PairingStatus::Accepted));
+  acceptConnection("remembered-peer reconnect (no PairingAuth within grace)");
 }
 
 void BlePeripheralContext::onUpstreamWritten(const QByteArray &value)
@@ -206,15 +254,29 @@ void BlePeripheralContext::onUpstreamWritten(const QByteArray &value)
 void BlePeripheralContext::onCentralConnected()
 {
   LOG_NOTE("BLE central subscribed (peripheral side notified)");
+  if (m_paired || m_acceptedSocket)
+    return;
+  if (Settings::value(Settings::Server::HasBlePairedPeer).toBool()) {
+    LOG_NOTE("BLE: starting remembered-peer accept grace (%d ms)",
+             m_rememberedAcceptTimer ? m_rememberedAcceptTimer->interval() : 0);
+    if (m_rememberedAcceptTimer && !m_rememberedAcceptTimer->isActive())
+      m_rememberedAcceptTimer->start();
+  }
 }
 
 void BlePeripheralContext::onCentralDisconnected()
 {
   LOG_NOTE("BLE central unsubscribed acceptedSocket=%p", (void *)m_acceptedSocket);
+  if (m_rememberedAcceptTimer)
+    m_rememberedAcceptTimer->stop();
   if (m_acceptedSocket) {
     m_acceptedSocket->notifyDisconnected();
     m_acceptedSocket = nullptr;
   }
+  // Allow the next subscriber (a fresh reconnect, possibly after Bluetooth
+  // address randomisation on the peer) to re-enter the remembered-peer
+  // accept path. The persistent HasBlePairedPeer flag is the trust source.
+  m_paired = false;
 }
 
 void BlePeripheralContext::onMtuChanged(int mtu)

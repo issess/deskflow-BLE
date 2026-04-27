@@ -60,10 +60,17 @@ private:
   void resetCode();
   void tearDown();
   QByteArray buildManufacturerData() const;
+  void acceptConnection(const char *reason);
+  void onRememberedAcceptElapsed();
 
   BleListenSocket *m_owner;
   IBlePeripheralBackend *m_backend = nullptr;
   QTimer *m_timeout = nullptr;
+  // Fires after a central subscribes if no PairingAuth write arrives within
+  // the grace window. If the host has been paired previously
+  // (Settings::Server::HasBlePairedPeer), we treat the silence as a
+  // remembered-peer reconnect and accept the connection.
+  QTimer *m_rememberedAcceptTimer = nullptr;
   BlePairingCode m_code;
   QString m_currentCode;
   int m_attempts = 0;

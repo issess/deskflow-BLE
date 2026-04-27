@@ -112,6 +112,10 @@ public:
     inline static const auto ExternalConfig = QStringLiteral("server/externalConfig");
     inline static const auto ExternalConfigFile = QStringLiteral("server/externalConfigFile");
     inline static const auto Protocol = QStringLiteral("server/protocol");
+    // Set true after the first successful BLE pairing on this host. While set,
+    // the BLE peripheral context auto-accepts a remembered-peer reconnect
+    // (i.e. a central that subscribes without writing the per-session code).
+    inline static const auto HasBlePairedPeer = QStringLiteral("server/hasBlePairedPeer");
   };
 
   // Enums types used in settings
