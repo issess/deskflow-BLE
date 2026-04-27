@@ -226,15 +226,18 @@ void BlePeripheralContext::onRememberedAcceptElapsed()
 {
   if (m_paired || m_acceptedSocket)
     return;
-  if (!Settings::value(Settings::Server::HasBlePairedPeer).toBool()) {
-    LOG_DEBUG("BLE: remembered-accept grace elapsed but no prior pairing — waiting for code");
-    return;
-  }
   // Treat the GATT-level subscription as the reconnect signal. The central
-  // proved nothing here, but the symmetric assumption is that prior pairing
-  // established trust, and the central has chosen to skip the code handshake.
+  // proved nothing here, but the symmetric assumption is that the central
+  // has already chosen to skip the code handshake (BleSocket.cpp:334-341)
+  // and we trust that decision — same as the central trusts hosts that
+  // advertise the Deskflow service UUID without having proved anything.
   m_paired = true;
   m_timeout->stop();
+  // Bootstrap the persistent flag for diagnostics and forward compatibility:
+  // future connection-flow tightening (e.g., per-peer tokens) can use it as
+  // a cheap "host has been used as a Deskflow BLE server" signal.
+  Settings::setValue(Settings::Server::HasBlePairedPeer, true);
+  Settings::save();
   m_code.clear();
   m_currentCode.clear();
   BlePairingBroker::instance().clearActiveCode();
@@ -256,12 +259,20 @@ void BlePeripheralContext::onCentralConnected()
   LOG_NOTE("BLE central subscribed (peripheral side notified)");
   if (m_paired || m_acceptedSocket)
     return;
-  if (Settings::value(Settings::Server::HasBlePairedPeer).toBool()) {
-    LOG_NOTE("BLE: starting remembered-peer accept grace (%d ms)",
-             m_rememberedAcceptTimer ? m_rememberedAcceptTimer->interval() : 0);
-    if (m_rememberedAcceptTimer && !m_rememberedAcceptTimer->isActive())
-      m_rememberedAcceptTimer->start();
-  }
+  // Always start the grace window. If the central is doing the fresh-code
+  // flow, its PairingAuth write will arrive well inside it and onPairingAuth
+  // Written will stop the timer and take the traditional path. If the central
+  // is reconnecting in remembered-peer mode (BleSocket.cpp:334-341 — symmetric
+  // counterpart on the central side), it will subscribe and stay silent;
+  // when the timer elapses we accept the connection. The HasBlePairedPeer
+  // setting is recorded for diagnostics but is not used as a gate, since the
+  // central's own remembered-peer path doesn't gate on a host-side flag.
+  const bool hasFlag = Settings::value(Settings::Server::HasBlePairedPeer).toBool();
+  LOG_NOTE("BLE: starting accept grace (%d ms) hasPairedFlag=%d",
+           m_rememberedAcceptTimer ? m_rememberedAcceptTimer->interval() : 0,
+           hasFlag ? 1 : 0);
+  if (m_rememberedAcceptTimer && !m_rememberedAcceptTimer->isActive())
+    m_rememberedAcceptTimer->start();
 }
 
 void BlePeripheralContext::onCentralDisconnected()
