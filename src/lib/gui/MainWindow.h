@@ -141,6 +141,7 @@ private:
   void daemonIpcClientConnectionFailed();
   void toggleCanRunCore(bool enableButtons);
   void remoteHostChanged(const QString &newRemoteHost);
+  void applyTransportToHostnameField();
   void updateIpLabel(const QStringList &addresses);
   void updateTimeoutDelay(int newDelay);
 

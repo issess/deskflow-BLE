@@ -51,6 +51,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
+#include <QSignalBlocker>
 #include <QScreen>
 #include <QScrollBar>
 
@@ -138,6 +139,8 @@ MainWindow::MainWindow()
       Settings::setValue(Settings::Core::Transport, v);
       Settings::save();
       updateBleControls();
+      applyTransportToHostnameField();
+      toggleCanRunCore(canRunCore());
     });
 
     connect(m_cbBleBackend, &QComboBox::currentIndexChanged, this, [this](int) {
@@ -163,6 +166,7 @@ MainWindow::MainWindow()
         if (!m_coreProcess.isStarted())
           startCore();
       });
+      connect(dlg, &QDialog::finished, this, [this] { applyTransportToHostnameField(); });
       dlg->show();
       if (mode == BlePairingDialog::Mode::Host && !m_coreProcess.isStarted()) {
         startCore();
@@ -781,6 +785,8 @@ void MainWindow::applyConfig()
   if (const auto host = Settings::value(Settings::Client::RemoteHost).toString(); !host.isEmpty())
     ui->lineHostname->setText(host);
 
+  applyTransportToHostnameField();
+
   updateLocalFingerprint();
   setTrayIcon();
 
@@ -1315,6 +1321,27 @@ void MainWindow::remoteHostChanged(const QString &newRemoteHost)
     Settings::setValue(Settings::Client::RemoteHost);
   } else {
     Settings::setValue(Settings::Client::RemoteHost, newRemoteHost);
+  }
+}
+
+void MainWindow::applyTransportToHostnameField()
+{
+  const bool ble = m_cbTransport && m_cbTransport->currentData().toString() == QStringLiteral("ble");
+  QSignalBlocker blocker(ui->lineHostname);
+  if (ble) {
+    const auto bleDevice = Settings::value(Settings::Client::RemoteBleDevice).toString();
+    ui->lineHostname->setReadOnly(true);
+    ui->lineHostname->setPlaceholderText(tr("Click \"BLE Pair…\" to pair a device"));
+    ui->lineHostname->setText(bleDevice);
+    ui->lineHostname->setToolTip(
+        bleDevice.isEmpty() ? tr("No BLE device paired yet")
+                            : tr("Paired BLE device: %1").arg(bleDevice));
+  } else {
+    ui->lineHostname->setReadOnly(false);
+    ui->lineHostname->setPlaceholderText(QString());
+    ui->lineHostname->setToolTip(QString());
+    const auto host = Settings::value(Settings::Client::RemoteHost).toString();
+    ui->lineHostname->setText(host);
   }
 }
 
