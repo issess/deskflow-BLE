@@ -203,11 +203,17 @@ void BleSocketContext::onScanDeviceDiscovered(const QBluetoothDeviceInfo &info)
   // and we'll pick the right peer on the next scan iteration. This guards
   // against stacks that drop manufacturer data from the primary advert.
   //
-  // Skip this fallback when reconnecting to a remembered peer (no code in
-  // hand) — at that point only the saved-peer match should fire, otherwise
-  // we'd happily connect to any nearby Deskflow host without authentication.
-  if (hasDeskflowSvc && m_pendingCode.size() > 0) {
-    LOG_NOTE("BLE central: Deskflow service UUID matched (mfgData unavailable), trying connection to %s",
+  // Allowed when:
+  //   * we have a pending pairing code (initial pair flow), or
+  //   * we have a remembered peer ID — the Windows BLE stack often surfaces
+  //     scan results with a null/zero address+UUID (re-randomised after a
+  //     host restart), so matchByPersisted/Address/Uuid all fail and the
+  //     saved-peer fast path above can't fire. In that case the
+  //     Deskflow-service-UUID match is the only signal we have for "this is
+  //     a Deskflow host"; connect and let the GATT layer take over.
+  if (hasDeskflowSvc && (m_pendingCode.size() > 0 || !m_savedDeviceId.isEmpty())) {
+    LOG_NOTE("BLE central: Deskflow service UUID matched (mfgData unavailable, %s), trying connection to %s",
+             m_pendingCode.size() > 0 ? "pending code" : "remembered-peer",
              info.deviceUuid().toString().toUtf8().constData());
     ++m_scanMagicHit;
     m_discovery->stop();
@@ -217,8 +223,12 @@ void BleSocketContext::onScanDeviceDiscovered(const QBluetoothDeviceInfo &info)
 
   if (magicOk) {
     LOG_NOTE("BLE central: skip (Deskflow magic matched but code hash differs)");
+  } else if (md.size() > 0 && hasDeskflowSvc) {
+    LOG_NOTE("BLE central: skip (Deskflow service UUID present but mfgData magic mismatch and no code/saved peer)");
   } else if (md.size() > 0) {
     LOG_NOTE("BLE central: skip (mfgData present but magic mismatch)");
+  } else if (hasDeskflowSvc) {
+    LOG_NOTE("BLE central: skip (Deskflow service UUID present but no pairing code and no remembered peer)");
   } else {
     LOG_NOTE("BLE central: skip (no Deskflow mfgData and no Deskflow service UUID)");
   }
