@@ -7,6 +7,7 @@
 #include "ble/win/WinRtBlePeripheralBackend.h"
 
 #include "base/Log.h"
+#include "ble/BleProtocolClassifier.h"
 #include "ble/BleTransport.h"
 
 #include <QMetaObject>
@@ -204,6 +205,7 @@ struct WinRtBlePeripheralBackend::Impl
   std::deque<QByteArray> dsQueue;
   bool dsPumpScheduled = false;
   std::atomic<uint64_t> dsDroppedTotal{0};
+  std::atomic<uint64_t> dsCoalescedMouseTotal{0};
 
   void emitStartFailed(const QString &reason)
   {
@@ -704,6 +706,34 @@ struct WinRtBlePeripheralBackend::Impl
       }
     }
   }
+
+  size_t coalescePendingMouseMoveLocked()
+  {
+    size_t removed = 0;
+    for (auto it = dsQueue.begin(); it != dsQueue.end();) {
+      if (isMouseMoveBleChunk(*it)) {
+        it = dsQueue.erase(it);
+        ++removed;
+      } else {
+        ++it;
+      }
+    }
+    return removed;
+  }
+
+  bool dropOneQueuedChunkForOverflowLocked()
+  {
+    for (auto it = dsQueue.begin(); it != dsQueue.end(); ++it) {
+      if (isMouseMoveBleChunk(*it)) {
+        dsQueue.erase(it);
+        return true;
+      }
+    }
+    if (dsQueue.empty())
+      return false;
+    dsQueue.pop_front();
+    return true;
+  }
 };
 
 WinRtBlePeripheralBackend::WinRtBlePeripheralBackend(QObject *parent)
@@ -781,17 +811,26 @@ void WinRtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
     return;
   bool needPump = false;
   size_t dropped = 0;
+  size_t coalescedMouse = 0;
   {
     std::lock_guard<std::mutex> lock(m_impl->dsMu);
+    if (isMouseMoveBleChunk(chunk))
+      coalescedMouse = m_impl->coalescePendingMouseMoveLocked();
     m_impl->dsQueue.push_back(chunk);
     while (m_impl->dsQueue.size() > Impl::kDownstreamQueueCap) {
-      m_impl->dsQueue.pop_front();
+      if (!m_impl->dropOneQueuedChunkForOverflowLocked())
+        break;
       ++dropped;
     }
     if (!m_impl->dsPumpScheduled) {
       m_impl->dsPumpScheduled = true;
       needPump = true;
     }
+  }
+  if (coalescedMouse) {
+    const auto total = m_impl->dsCoalescedMouseTotal.fetch_add(coalescedMouse) + coalescedMouse;
+    LOG_DEBUG("WinRT: downstream coalesced %zu pending mouse chunk(s), total=%llu",
+              coalescedMouse, static_cast<unsigned long long>(total));
   }
   if (dropped) {
     const auto total = m_impl->dsDroppedTotal.fetch_add(dropped) + dropped;

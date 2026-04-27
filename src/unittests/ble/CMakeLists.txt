@@ -16,3 +16,11 @@ create_test(
   SOURCE BleFramingTests.cpp
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/ble"
 )
+
+create_test(
+  NAME BleProtocolClassifierTests
+  DEPENDS ble
+  LIBS base common
+  SOURCE BleProtocolClassifierTests.cpp
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/ble"
+)

@@ -12,6 +12,7 @@
 #include "base/Log.h"
 #include "ble/BlePairingBroker.h"
 #include "ble/BlePairingCode.h"
+#include "ble/BleProtocolClassifier.h"
 #include "ble/BleTransport.h"
 #include "ble/IBlePeripheralBackend.h"
 #include "common/Settings.h"
@@ -779,6 +780,11 @@ void BleSocket::write(const void *buffer, uint32_t n)
   }
   LOG_DEBUG("BleSocket::write n=%u", n);
   QByteArray payload(reinterpret_cast<const char *>(buffer), static_cast<int>(n));
+  if (isNoopPsfFrame(payload)) {
+    LOG_DEBUG("BleSocket::write suppressed BLE no-op frame");
+    sendEvent(static_cast<int>(EventTypes::StreamOutputFlushed));
+    return;
+  }
   // Hop to the Qt thread that owns the controller before touching the service.
   QMetaObject::invokeMethod(
       m_ctx, "enqueueOutbound", Qt::QueuedConnection, Q_ARG(QByteArray, payload)

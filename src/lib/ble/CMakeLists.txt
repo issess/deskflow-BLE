@@ -12,6 +12,8 @@ set(ble_sources
   BlePairingBroker.h
   BlePairingCode.cpp
   BlePairingCode.h
+  BleProtocolClassifier.cpp
+  BleProtocolClassifier.h
   BleSocket.cpp
   BleSocket.h
   BleSocketFactory.cpp
