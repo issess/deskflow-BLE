@@ -643,6 +643,18 @@ Additionally, check you are able to %1 the server config file: %2</source>
         <source>&amp;BLE Pair…</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>BLE backend:</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>WinRT</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Qt Bluetooth</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>NewScreenWidget</name>
