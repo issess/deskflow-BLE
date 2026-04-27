@@ -95,6 +95,10 @@ void ServerProxy::handleData()
       switch ((this->*m_parser)(code)) {
         using enum ConnectionResult;
       case Okay:
+        // Any valid server message proves the connection is alive. On slower
+        // transports such as BLE, keepalive frames can sit behind input events
+        // even while the server is actively sending data.
+        resetKeepAliveAlarm();
         break;
 
       case Unknown:
