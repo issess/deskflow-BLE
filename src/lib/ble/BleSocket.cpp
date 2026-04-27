@@ -686,8 +686,16 @@ void BleSocket::deliverInbound(const QByteArray &chunk)
   }
   LOG_DEBUG("BleSocket::deliverInbound chunk=%d parsed=%d payloadBytes=%d bufNow=%d shutdown=%d hasData=%d",
             chunk.size(), payloadsParsed, totalPayloadBytes, bufSize, inputShutdown, hasData);
-  if (hasData)
-    sendEvent(static_cast<int>(EventTypes::StreamInputReady));
+  if (hasData) {
+    // Synchronously dispatch StreamInputReady on the same thread that
+    // received the BLE chunk. The default queued path adds a cond-var
+    // wakeup + main-loop round trip before the protocol layer (PSF +
+    // ServerProxy) sees the bytes — easily ~1 ms on a busy event loop.
+    // The handler runs PSF::readMore and the protocol dispatcher inline,
+    // which is safe here because we already released m_mutex above.
+    m_events->addEvent(
+        Event(EventTypes::StreamInputReady, getEventTarget(), nullptr, Event::EventFlags::DeliverImmediately));
+  }
 }
 
 void BleSocket::updateMtu(int mtu)
