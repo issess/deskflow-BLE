@@ -100,15 +100,8 @@ void BleSocketContext::startCentral(QString savedDeviceId, QString code)
   m_pairingAccepted = false;
 
   if (!savedDeviceId.isEmpty() && code.isEmpty()) {
-    LOG_NOTE("BLE central: reconnecting to remembered peer %s",
+    LOG_NOTE("BLE central: have remembered peer %s — will match it during scan",
              savedDeviceId.toUtf8().constData());
-    const QBluetoothDeviceInfo info = savedDeviceId.contains(QLatin1Char(':'))
-                                          ? QBluetoothDeviceInfo(QBluetoothAddress(savedDeviceId),
-                                                                 QStringLiteral("Deskflow"), 0)
-                                          : QBluetoothDeviceInfo(QBluetoothUuid(savedDeviceId),
-                                                                 QStringLiteral("Deskflow"), 0);
-    connectToCentralDevice(info);
-    return;
   }
 
   LOG_NOTE("BLE central: creating device discovery agent");
@@ -164,6 +157,32 @@ void BleSocketContext::onScanDeviceDiscovered(const QBluetoothDeviceInfo &info)
     return;
   ++m_scanLeSeen;
 
+  // Remembered-peer fast path: if we have a saved peer ID and the scan
+  // surfaces a device whose persisted ID matches, connect immediately.
+  // This preserves the real device name/services rather than synthesising
+  // a stub QBluetoothDeviceInfo, and ensures the OS BLE stack has a fresh
+  // advertising record before we attempt the GATT connection.
+  if (!m_savedDeviceId.isEmpty() && m_pendingCode.isEmpty()) {
+    const QString persistedNow = deviceIdForPersistence(info);
+    const bool matchByPersisted =
+        !isNullBleDeviceId(persistedNow) &&
+        persistedNow.compare(m_savedDeviceId, Qt::CaseInsensitive) == 0;
+    const bool matchByAddress =
+        !info.address().isNull() &&
+        info.address().toString().compare(m_savedDeviceId, Qt::CaseInsensitive) == 0;
+    const bool matchByUuid =
+        !info.deviceUuid().isNull() &&
+        info.deviceUuid().toString().compare(m_savedDeviceId, Qt::CaseInsensitive) == 0;
+    if (matchByPersisted || matchByAddress || matchByUuid) {
+      LOG_NOTE("BLE central: remembered peer %s seen as name='%s', connecting",
+               m_savedDeviceId.toUtf8().constData(),
+               info.name().toUtf8().constData());
+      m_discovery->stop();
+      connectToCentralDevice(info);
+      return;
+    }
+  }
+
   const bool magicOk = md.size() >= 6 &&
                        static_cast<quint8>(md[0]) == ((kAdvertMagic >> 8) & 0xFF) &&
                        static_cast<quint8>(md[1]) == (kAdvertMagic & 0xFF);
@@ -183,7 +202,11 @@ void BleSocketContext::onScanDeviceDiscovered(const QBluetoothDeviceInfo &info)
   // connection anyway. The host will reject a wrong code via PairingStatus
   // and we'll pick the right peer on the next scan iteration. This guards
   // against stacks that drop manufacturer data from the primary advert.
-  if (hasDeskflowSvc) {
+  //
+  // Skip this fallback when reconnecting to a remembered peer (no code in
+  // hand) — at that point only the saved-peer match should fire, otherwise
+  // we'd happily connect to any nearby Deskflow host without authentication.
+  if (hasDeskflowSvc && m_pendingCode.size() > 0) {
     LOG_NOTE("BLE central: Deskflow service UUID matched (mfgData unavailable), trying connection to %s",
              info.deviceUuid().toString().toUtf8().constData());
     ++m_scanMagicHit;
