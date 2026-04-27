@@ -325,6 +325,21 @@ void BleSocketContext::onServiceStateChanged(QLowEnergyService::ServiceState sta
     return;
   LOG_NOTE("BLE central: service fully discovered, enabling notifications");
   enableNotifications();
+
+  // Remembered-peer reconnect: no pairing code in hand, so the host won't
+  // emit PairingStatus::Accepted. Treat the GATT-level connection itself as
+  // proof of identity (we already matched the saved peer ID during scan)
+  // and surface the connect upwards so the deskflow protocol starts reading
+  // the data the host is already streaming on DataDownstream.
+  if (m_pendingCode.isEmpty() && !m_savedDeviceId.isEmpty()) {
+    LOG_NOTE("BLE central: remembered-peer mode — skipping code handshake, "
+             "marking connection accepted");
+    m_pairingAccepted = true;
+    if (m_owner)
+      m_owner->notifyConnected();
+    return;
+  }
+
   writePairingCode();
 }
 

@@ -572,19 +572,41 @@ struct WinRtBlePeripheralBackend::Impl
       LOG_WARN("WinRT: workerNotify dropped %d bytes (characteristic null)", chunk.size());
       return;
     }
-    try {
-      // MTU may finalise only after the first writes/notifies on some host
-      // stacks, so probe again here. Cheap and idempotent.
-      refreshNegotiatedMtuFromSubscribers();
-      auto buf = qByteArrayToIBuffer(chunk);
-      ch.NotifyValueAsync(buf).get();
-      LOG_DEBUG("WinRT: notify size=%d mtu=%d statusSubs=%d downSubs=%d",
-                chunk.size(), mtu.load(), pairingStatusSubscribers.load(), downstreamSubscribers.load());
-    } catch (const winrt::hresult_error &e) {
-      LOG_WARN("WinRT: NotifyValueAsync threw hr=0x%08x size=%d",
-               static_cast<unsigned>(e.code().value), chunk.size());
-    } catch (const std::exception &e) {
-      LOG_WARN("WinRT: NotifyValueAsync threw std::exception: %s size=%d", e.what(), chunk.size());
+    // MTU may finalise only after the first writes/notifies on some host
+    // stacks, so probe again here. Cheap and idempotent.
+    refreshNegotiatedMtuFromSubscribers();
+
+    // Windows GATT server occasionally throws E_ILLEGAL_METHOD_CALL (0x8000000E)
+    // on a NotifyValueAsync that immediately follows another notify, especially
+    // across two different characteristics on the same connection. The link-
+    // layer transmission is still settling even though the previous .get()
+    // returned. Retry a few times with a brief backoff before giving up.
+    constexpr int kMaxAttempts = 5;
+    constexpr DWORD kBackoffMs = 15;
+    for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+      try {
+        auto buf = qByteArrayToIBuffer(chunk);
+        ch.NotifyValueAsync(buf).get();
+        LOG_DEBUG("WinRT: notify size=%d mtu=%d statusSubs=%d downSubs=%d attempt=%d",
+                  chunk.size(), mtu.load(), pairingStatusSubscribers.load(),
+                  downstreamSubscribers.load(), attempt);
+        return;
+      } catch (const winrt::hresult_error &e) {
+        const auto hr = static_cast<unsigned>(e.code().value);
+        const bool retryable = (hr == 0x8000000E /* E_ILLEGAL_METHOD_CALL */);
+        if (retryable && attempt < kMaxAttempts) {
+          LOG_DEBUG("WinRT: NotifyValueAsync hr=0x%08x size=%d attempt=%d, retrying",
+                    hr, chunk.size(), attempt);
+          ::Sleep(kBackoffMs * attempt);
+          continue;
+        }
+        LOG_WARN("WinRT: NotifyValueAsync threw hr=0x%08x size=%d attempts=%d",
+                 hr, chunk.size(), attempt);
+        return;
+      } catch (const std::exception &e) {
+        LOG_WARN("WinRT: NotifyValueAsync threw std::exception: %s size=%d", e.what(), chunk.size());
+        return;
+      }
     }
   }
 };
