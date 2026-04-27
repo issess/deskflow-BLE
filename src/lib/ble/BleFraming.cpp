@@ -133,6 +133,10 @@ BleFramingReader::FeedResult BleFramingReader::feedChunk(const QByteArray &chunk
     }
     if (diff > 1)
       gapDetected = true;
+    // Count one gap event per frame, on the first chunk of a new packetId.
+    // Subsequent chunks of the same multi-chunk frame must not double-count.
+    if (gapDetected && !(m_assembling && m_currentId == packetId))
+      ++m_gapEvents;
   }
 
   // Are we already assembling a different frame? Drop it — losing one frame
