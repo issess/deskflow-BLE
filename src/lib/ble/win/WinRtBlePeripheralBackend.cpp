@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <queue>
@@ -182,6 +183,19 @@ struct WinRtBlePeripheralBackend::Impl
   std::atomic<int> mtu{512};
   QString localName;
   QByteArray mfgPayload;
+
+  // Bounded outbound queue for DataDownstream notifies. Each notify takes
+  // ~100-130 ms over BLE; if the producer (server-side input events such as
+  // mouse moves) outpaces the link, the worker queue grows unbounded and
+  // critical messages like CALV (keep-alive) get stuck behind tens of stale
+  // mouse-move chunks. The client's keep-alive alarm (9 s default) then trips
+  // and reports "server is dead". We cap pending downstream chunks and drop
+  // oldest on overflow — stale mouse positions are the expected casualty.
+  static constexpr size_t kDownstreamQueueCap = 16;
+  std::mutex dsMu;
+  std::deque<QByteArray> dsQueue;
+  bool dsPumpScheduled = false;
+  std::atomic<uint64_t> dsDroppedTotal{0};
 
   void emitStartFailed(const QString &reason)
   {
@@ -569,6 +583,11 @@ struct WinRtBlePeripheralBackend::Impl
     starting = false;
     pairingStatusSubscribers = 0;
     downstreamSubscribers = 0;
+    {
+      std::lock_guard<std::mutex> lock(dsMu);
+      dsQueue.clear();
+      dsPumpScheduled = false;
+    }
   }
 
   void workerNotify(wgap::GattLocalCharacteristic &ch, const QByteArray &chunk)
@@ -689,7 +708,43 @@ void WinRtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
 {
   if (!m_impl)
     return;
-  m_impl->worker.post([this, chunk] { m_impl->workerNotify(m_impl->dataDownstream, chunk); });
+  bool needPump = false;
+  size_t dropped = 0;
+  {
+    std::lock_guard<std::mutex> lock(m_impl->dsMu);
+    m_impl->dsQueue.push_back(chunk);
+    while (m_impl->dsQueue.size() > Impl::kDownstreamQueueCap) {
+      m_impl->dsQueue.pop_front();
+      ++dropped;
+    }
+    if (!m_impl->dsPumpScheduled) {
+      m_impl->dsPumpScheduled = true;
+      needPump = true;
+    }
+  }
+  if (dropped) {
+    const auto total = m_impl->dsDroppedTotal.fetch_add(dropped) + dropped;
+    LOG_WARN("WinRT: downstream queue overflow — dropped %zu old chunk(s), total dropped=%llu",
+             dropped, static_cast<unsigned long long>(total));
+  }
+  if (needPump) {
+    auto *impl = m_impl.get();
+    m_impl->worker.post([impl] {
+      while (true) {
+        QByteArray next;
+        {
+          std::lock_guard<std::mutex> lock(impl->dsMu);
+          if (impl->dsQueue.empty()) {
+            impl->dsPumpScheduled = false;
+            return;
+          }
+          next = impl->dsQueue.front();
+          impl->dsQueue.pop_front();
+        }
+        impl->workerNotify(impl->dataDownstream, next);
+      }
+    });
+  }
 }
 
 int WinRtBlePeripheralBackend::negotiatedMtu() const
