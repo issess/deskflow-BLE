@@ -170,6 +170,14 @@ struct WinRtBlePeripheralBackend::Impl
   wgap::GattLocalCharacteristic dataUpstream{nullptr};
   wgap::GattLocalCharacteristic control{nullptr};
 
+  // Companion advertiser carrying the Deskflow manufacturer-data blob in
+  // parallel with the GattServiceProvider's advertising. The GATT advertising
+  // params object only exposes IsConnectable / IsDiscoverable; it cannot
+  // include manufacturer data. Without this publisher, peers that filter by
+  // manufacturer-data magic would have to fall back to UUID-only matching.
+  wadv::BluetoothLEAdvertisementPublisher mfgPublisher{nullptr};
+  winrt::event_token tokMfgPublisherStatus{};
+
   winrt::event_token tokPairingAuthWrite{};
   winrt::event_token tokDataUpstreamWrite{};
   winrt::event_token tokAdvertisementStatusChanged{};
@@ -464,7 +472,69 @@ struct WinRtBlePeripheralBackend::Impl
       return false;
     }
     starting = false;
+    startManufacturerDataAdvertiser();
     return true;
+  }
+
+  // Run alongside the GattServiceProvider advertiser. Carries the Deskflow
+  // manufacturer-data magic + code-hash so peers can filter on mfgData
+  // before bothering to connect/discover. Best-effort: if Windows refuses
+  // (e.g. radio busy, adapter doesn't allow concurrent legacy advertisers)
+  // we just log and continue — the GATT-level UUID match path still works.
+  void startManufacturerDataAdvertiser()
+  {
+    if (mfgPayload.isEmpty()) {
+      LOG_NOTE("WinRT: skipping manufacturer-data advertiser (empty payload)");
+      return;
+    }
+    try {
+      mfgPublisher = wadv::BluetoothLEAdvertisementPublisher();
+      auto adv = mfgPublisher.Advertisement();
+
+      wadv::BluetoothLEManufacturerData md;
+      md.CompanyId(kManufacturerId);
+      wss::DataWriter w;
+      w.WriteBytes(winrt::array_view<const uint8_t>(
+          reinterpret_cast<const uint8_t *>(mfgPayload.constData()),
+          reinterpret_cast<const uint8_t *>(mfgPayload.constData()) + mfgPayload.size()));
+      md.Data(w.DetachBuffer());
+      adv.ManufacturerData().Append(md);
+
+      tokMfgPublisherStatus = mfgPublisher.StatusChanged(
+          [](wadv::BluetoothLEAdvertisementPublisher const &sender,
+             wadv::BluetoothLEAdvertisementPublisherStatusChangedEventArgs const &args) {
+            LOG_NOTE("WinRT: mfgData publisher status -> %d error=%d",
+                     static_cast<int>(sender.Status()), static_cast<int>(args.Error()));
+          });
+      mfgPublisher.Start();
+      LOG_NOTE("WinRT: mfgData publisher Start() called (companyId=0x%04x payload=%d bytes)",
+               kManufacturerId, mfgPayload.size());
+    } catch (const winrt::hresult_error &e) {
+      LOG_WARN("WinRT: mfgData publisher Start threw hr=0x%08x msg=%ls — continuing with UUID-only advertising",
+               static_cast<unsigned>(e.code().value), e.message().c_str());
+      mfgPublisher = nullptr;
+    } catch (const std::exception &e) {
+      LOG_WARN("WinRT: mfgData publisher Start threw std::exception: %s — continuing", e.what());
+      mfgPublisher = nullptr;
+    }
+  }
+
+  void stopManufacturerDataAdvertiser()
+  {
+    if (!mfgPublisher)
+      return;
+    try {
+      if (tokMfgPublisherStatus.value)
+        mfgPublisher.StatusChanged(tokMfgPublisherStatus);
+      tokMfgPublisherStatus = {};
+      const auto st = mfgPublisher.Status();
+      if (st == wadv::BluetoothLEAdvertisementPublisherStatus::Started ||
+          st == wadv::BluetoothLEAdvertisementPublisherStatus::Waiting) {
+        mfgPublisher.Stop();
+      }
+    } catch (...) {
+    }
+    mfgPublisher = nullptr;
   }
 
   void wireEvents()
@@ -556,6 +626,7 @@ struct WinRtBlePeripheralBackend::Impl
   void workerStop()
   {
     LOG_NOTE("WinRT: workerStop");
+    stopManufacturerDataAdvertiser();
     try {
       if (serviceProvider) {
         if (tokAdvertisementStatusChanged.value)
