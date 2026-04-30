@@ -280,6 +280,17 @@ struct WinRtBlePeripheralBackend::Impl
     mtu.store(negotiated);
     LOG_NOTE("WinRT: MTU updated %d -> %d (from peer GattSession)", prev, negotiated);
     emitMtuChanged(negotiated);
+    // TestC: link is mature now (post-MTU exchange); the original request issued
+    // at SubscribedClientsChanged time often hits PartialFailure because the OS
+    // still considers the link unstable. Drop and re-issue once the link is
+    // warm — the second request is more likely to be honoured.
+    worker.post([this] {
+      if (preferredConnReq) {
+        preferredConnReq = nullptr;
+        LOG_NOTE("WinRT: dropping initial preferred-conn-params request to retry post-MTU");
+      }
+      requestThroughputOptimizedConn();
+    });
   }
 
   // Ask the link layer for ThroughputOptimized connection params (short

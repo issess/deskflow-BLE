@@ -655,6 +655,18 @@ Additionally, check you are able to %1 the server config file: %2</source>
         <source>Qt Bluetooth</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Click &quot;BLE Pair…&quot; to pair a device</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>No BLE device paired yet</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Paired BLE device: %1</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>NewScreenWidget</name>

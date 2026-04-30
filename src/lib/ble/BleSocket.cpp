@@ -524,7 +524,7 @@ void BleSocketContext::drainCentralWriteQueue()
   // confirmation. Cap each burst to keep the OS BLE buffer from overflowing
   // and yield via QTimer::singleShot(0) between bursts so the event loop
   // can pump notifications and other Qt work between bursts.
-  constexpr int kBurstChunks = 4;
+  constexpr int kBurstChunks = 16;
   int sent = 0;
   while (sent < kBurstChunks && !m_centralWriteQueue.isEmpty()) {
     const QByteArray chunk = m_centralWriteQueue.dequeue();
@@ -533,7 +533,7 @@ void BleSocketContext::drainCentralWriteQueue()
     ++sent;
   }
   if (!m_centralWriteQueue.isEmpty()) {
-    QTimer::singleShot(0, this, &BleSocketContext::drainCentralWriteQueue);
+    QMetaObject::invokeMethod(this, &BleSocketContext::drainCentralWriteQueue, Qt::QueuedConnection);
   }
   m_centralWriteInFlight = false; // gate retained for source compat; not used
 }
