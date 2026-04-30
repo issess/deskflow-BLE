@@ -27,6 +27,7 @@ class QLowEnergyCharacteristic;
 
 namespace deskflow::ble {
 class IBlePeripheralBackend;
+class WinRtBleCentralBackend;
 }
 
 namespace deskflow::ble {
@@ -117,6 +118,10 @@ private:
   QString m_connectedDeviceId;
   QQueue<QByteArray> m_centralWriteQueue;
   bool m_centralWriteInFlight = false;
+  // Windows-only fast path. When set, all central-side scan/connect/pair/write
+  // bypasses Qt's QLowEnergyController and goes through WinRT directly. The
+  // Qt-specific m_discovery/m_centralCtl fields above are unused in that mode.
+  deskflow::ble::WinRtBleCentralBackend *m_winrtCentral = nullptr;
   int m_scanSeen = 0;     // total devices scanned (any type)
   int m_scanLeSeen = 0;   // LE-capable devices
   int m_scanMagicHit = 0; // matched Deskflow magic (correct or wrong hash)

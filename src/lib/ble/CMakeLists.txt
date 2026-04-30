@@ -28,6 +28,8 @@ if(WIN32)
   list(APPEND ble_sources
     win/WinRtBlePeripheralBackend.cpp
     win/WinRtBlePeripheralBackend.h
+    win/WinRtBleCentralBackend.cpp
+    win/WinRtBleCentralBackend.h
   )
 endif()
 

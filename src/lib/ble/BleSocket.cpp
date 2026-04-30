@@ -17,6 +17,11 @@
 #include "ble/IBlePeripheralBackend.h"
 #include "common/Settings.h"
 
+#ifdef Q_OS_WIN
+#include "ble/win/WinRtBleCentralBackend.h"
+#endif
+
+
 #include <QBluetoothDeviceDiscoveryAgent>
 #include <QBluetoothAddress>
 #include <QBluetoothDeviceInfo>
@@ -34,6 +39,8 @@
 #include <QTextStream>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 
 namespace deskflow::ble {
@@ -106,6 +113,41 @@ void BleSocketContext::startCentral(QString savedDeviceId, QString code)
     LOG_NOTE("BLE central: have remembered peer %s — will match it during scan",
              savedDeviceId.toUtf8().constData());
   }
+
+#ifdef Q_OS_WIN
+  // Windows: use direct WinRT central backend. Bypasses Qt's QLowEnergyController
+  // entirely so the upstream-write path can call WriteValueAsync truly async.
+  m_winrtCentral = new WinRtBleCentralBackend(this);
+  QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::connected, this, [this] {
+    m_pairingAccepted = true;
+    BlePairingBroker::instance().clearPendingCode();
+    BlePairingBroker::instance().reportResult(true, QString());
+    QTextStream(stdout) << "BLE_PAIRING:RESULT=accepted:" << Qt::endl;
+    Settings::setValue(Settings::Client::PendingBleCode, QString());
+    Settings::save();
+    if (m_owner)
+      m_owner->notifyConnected();
+  });
+  QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::disconnected, this, [this] {
+    if (m_owner)
+      m_owner->notifyDisconnected();
+  });
+  QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::connectFailed, this,
+                   [this](const QString &reason) { failCentral(reason); });
+  QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::dataReceived, this,
+                   [this](const QByteArray &data) {
+                     if (m_owner)
+                       m_owner->deliverInbound(data);
+                   });
+  QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::mtuChanged, this, [this](int v) {
+    if (v > 0) {
+      m_mtu = v;
+      LOG_NOTE("BLE central (WinRT): MTU=%d", v);
+    }
+  });
+  m_winrtCentral->start(savedDeviceId, code);
+  return;
+#endif
 
   LOG_NOTE("BLE central: creating device discovery agent");
   m_discovery = new QBluetoothDeviceDiscoveryAgent(this);
@@ -448,6 +490,13 @@ void BleSocketContext::failCentral(const QString &reason)
 
 void BleSocketContext::detach()
 {
+#ifdef Q_OS_WIN
+  if (m_winrtCentral) {
+    m_winrtCentral->stop();
+    m_winrtCentral->deleteLater();
+    m_winrtCentral = nullptr;
+  }
+#endif
   if (m_service) {
     QObject::disconnect(m_service, nullptr, this, nullptr);
   }
@@ -470,7 +519,16 @@ void BleSocketContext::detach()
 
 void BleSocketContext::enqueueOutbound(QByteArray payload)
 {
-  const int chunkSize = std::max(BleFramingWriter::kHeaderSize + 1, m_mtu - 3);
+  int effectiveMtu = m_mtu;
+  // BLE_BENCH_MTU_CAP env var overrides the negotiated MTU for the chunking
+  // calculation. Used by ble-bench to compare throughput at fixed MTU sizes
+  // without renegotiating the link layer. No-op when unset or zero.
+  if (const char *capStr = std::getenv("BLE_BENCH_MTU_CAP")) {
+    const int cap = std::atoi(capStr);
+    if (cap > 0 && cap < effectiveMtu)
+      effectiveMtu = cap;
+  }
+  const int chunkSize = std::max(BleFramingWriter::kHeaderSize + 1, effectiveMtu - 3);
   auto frame = m_framingWriter.frame(payload, chunkSize);
   LOG_DEBUG("BleSocketContext::enqueueOutbound role=%d payload=%d mtu=%d chunks=%zu packetId=%u",
             static_cast<int>(m_role), payload.size(), m_mtu, frame.chunks.size(),
@@ -482,6 +540,15 @@ void BleSocketContext::enqueueOutbound(QByteArray payload)
       m_peripheralBackend->sendDownstream(c);
     return;
   }
+
+#ifdef Q_OS_WIN
+  // Windows central: bypass Qt's writeCharacteristic entirely.
+  if (m_role == Role::Central && m_winrtCentral) {
+    for (const auto &c : frame.chunks)
+      m_winrtCentral->writeUpstream(c);
+    return;
+  }
+#endif
 
   if (!m_service)
     return;
@@ -582,6 +649,12 @@ void BleSocketContext::onCharacteristicChanged(const QLowEnergyCharacteristic &c
       }
       if (m_owner)
         m_owner->notifyConnected();
+      // Note: a Windows-only WinRT fast-write path was attempted (see
+      // win/WinRtBleCentralWriter.{h,cpp}). It cannot bind because Qt's
+      // QLowEnergyController holds the GATT service in Exclusive sharing mode,
+      // so a parallel WinRT GattService::OpenAsync returns AccessDenied. The
+      // file is kept for future reference (e.g., if Qt grows a way to expose
+      // shared mode, or if the central is rewritten to use WinRT directly).
     } else if (status == PairingStatus::Rejected) {
       failCentral(QStringLiteral("host rejected code"));
     }

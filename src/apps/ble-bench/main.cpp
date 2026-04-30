@@ -54,10 +54,13 @@ namespace {
 
 constexpr uint8_t kMsgPing = 1;
 constexpr uint8_t kMsgPong = 2;
-constexpr uint8_t kMsgBenchStart = 3;
-constexpr uint8_t kMsgBenchData = 4;
-constexpr uint8_t kMsgBenchEnd = 5;
-constexpr uint8_t kMsgBenchReport = 6;
+constexpr uint8_t kMsgBenchStart = 3;       // central → peripheral: begin uplink bench
+constexpr uint8_t kMsgBenchData = 4;        // central → peripheral: uplink data
+constexpr uint8_t kMsgBenchEnd = 5;         // central → peripheral: end uplink bench
+constexpr uint8_t kMsgBenchReport = 6;      // peripheral → central: uplink result
+constexpr uint8_t kMsgDownBenchStart = 7;   // central → peripheral: begin downlink bench
+constexpr uint8_t kMsgDownBenchData = 8;    // peripheral → central: downlink data (Notify path)
+constexpr uint8_t kMsgDownBenchReport = 9;  // peripheral → central: downlink "I sent N bytes"
 
 QByteArray packU32(uint32_t v)
 {
@@ -203,6 +206,12 @@ private:
       break;
     }
     case kMsgBenchEnd: {
+      // BenchEnd terminates either the uplink phase or the downlink pump.
+      if (m_downActive) {
+        m_downActive = false;
+        say(QStringLiteral("ble-bench peripheral: downlink stopped by central"));
+        break;
+      }
       if (!m_benchActive)
         break;
       const auto t1 = steady_clock::now();
@@ -221,9 +230,36 @@ private:
       writeMessage(m_socket.get(), kMsgBenchReport, body);
       break;
     }
+    case kMsgDownBenchStart: {
+      // Central asked us to flood downstream. Pump unbounded until central
+      // sends BenchEnd. Central uses idle detection on its side.
+      m_downActive = true;
+      m_downBytes = 0;
+      m_downT0 = steady_clock::now();
+      say(QStringLiteral("ble-bench peripheral: downlink phase started"));
+      QTimer::singleShot(0, this, [this] { pumpDownlink(); });
+      break;
+    }
     default:
       break;
     }
+  }
+
+  void pumpDownlink()
+  {
+    if (!m_downActive)
+      return;
+    QByteArray body(kDownChunkBytes - 1, 'd');
+    writeMessage(m_socket.get(), kMsgDownBenchData, body);
+    m_downBytes += uint64_t(kDownChunkBytes);
+    // Hard ceiling so a forgotten test never consumes endless RAM in the
+    // peripheral-side downstream queue.
+    if (m_downBytes >= uint64_t(kDownMaxBytes)) {
+      m_downActive = false;
+      say(QString("ble-bench peripheral: downlink hit submit ceiling %1 B").arg(m_downBytes));
+      return;
+    }
+    QTimer::singleShot(5, this, [this] { pumpDownlink(); });
   }
 
   void onDisconnected()
@@ -231,6 +267,9 @@ private:
     say(QStringLiteral("ble-bench peripheral: link down"));
     QCoreApplication::quit();
   }
+
+  static constexpr int kDownChunkBytes = 1024;
+  static constexpr int kDownMaxBytes = 200 * 1024; // hard submit ceiling
 
   IEventQueue *m_events;
   deskflow::ble::BleListenSocket *m_listen = nullptr;
@@ -241,6 +280,9 @@ private:
   bool m_benchActive = false;
   uint64_t m_benchBytes = 0;
   steady_clock::time_point m_benchT0;
+  bool m_downActive = false;
+  uint64_t m_downBytes = 0;
+  steady_clock::time_point m_downT0;
 };
 
 // ---------------------- Central ----------------------
@@ -369,13 +411,19 @@ private:
     if (!m_bwActive)
       return;
     const auto now = steady_clock::now();
-    if (duration<double>(now - m_bwT0).count() >= double(kBenchSecs)) {
+    const bool timeUp = duration<double>(now - m_bwT0).count() >= double(kBenchSecs);
+    const bool capReached = m_bwSubmitted >= uint64_t(kBenchMaxBytes);
+    if (timeUp || capReached) {
       m_bwActive = false;
-      say(QString("ble-bench central: submitted %1 bytes; waiting for peer report").arg(m_bwSubmitted));
+      say(QString("ble-bench central: submitted %1 bytes (%2); waiting for peer report")
+              .arg(m_bwSubmitted)
+              .arg(capReached ? QStringLiteral("cap reached") : QStringLiteral("time up")));
       writeMessage(m_socket.get(), kMsgBenchEnd);
-      QTimer::singleShot(15000, this, [this] {
+      // Report can be delayed when submission outran the link — needs to drain
+      // through the peer's receive queue first.
+      QTimer::singleShot(60000, this, [this] {
         if (!m_reportSeen) {
-          say(QStringLiteral("ble-bench central: bandwidth report not received within 15s"));
+          say(QStringLiteral("ble-bench central: bandwidth report not received within 60s"));
           QCoreApplication::exit(4);
         }
       });
@@ -384,10 +432,6 @@ private:
     QByteArray body(kBenchChunkBytes - 1, 'x'); // -1 because type byte adds 1
     writeMessage(m_socket.get(), kMsgBenchData, body);
     m_bwSubmitted += uint64_t(kBenchChunkBytes);
-    // Pace just enough for the BleSocket outbound queue not to balloon. The
-    // central-side burst-drain in BleSocketContext handles 4 chunks per
-    // event-loop turn; we submit one application message (which may fragment
-    // into multiple BLE chunks) per turn.
     QTimer::singleShot(5, this, [this] { pumpBandwidth(); });
   }
 
@@ -440,12 +484,26 @@ private:
         us |= uint64_t(uint8_t(msg[1 + 4 + i])) << (8 * i);
       const double secs = double(us) / 1e6;
       const double kbps = double(bytes) / 1024.0 / std::max(secs, 1e-9);
-      say(QString("ble-bench central: BANDWIDTH report: peer received %1 bytes in %2 s = %3 KB/s")
+      say(QString("ble-bench central: UPLINK (write) peer received %1 bytes in %2 s = %3 KB/s")
               .arg(bytes)
               .arg(secs, 0, 'f', 3)
               .arg(kbps, 0, 'f', 2));
-      say(QString("ble-bench central: SUBMITTED %1 bytes from this side").arg(m_bwSubmitted));
-      QTimer::singleShot(500, this, [] { QCoreApplication::quit(); });
+      say(QString("ble-bench central: UPLINK submitted %1 bytes from this side").arg(m_bwSubmitted));
+      // Now run the downlink (peripheral → central, Notify path).
+      QTimer::singleShot(500, this, [this] { startDownlinkPhase(); });
+      break;
+    }
+    case kMsgDownBenchData: {
+      if (!m_downActive) {
+        m_downActive = true;
+        m_downRecvBytes = 0;
+        m_downT0 = steady_clock::now();
+        // Start idle-detection ticker.
+        m_downLastRx = m_downT0;
+        scheduleDownlinkIdleCheck();
+      }
+      m_downRecvBytes += uint64_t(msg.size() - 1);
+      m_downLastRx = steady_clock::now();
       break;
     }
     default:
@@ -453,9 +511,56 @@ private:
     }
   }
 
+  void scheduleDownlinkIdleCheck()
+  {
+    QTimer::singleShot(500, this, [this] {
+      if (!m_downActive)
+        return;
+      const auto now = steady_clock::now();
+      const double sinceLast = duration<double>(now - m_downLastRx).count();
+      if (sinceLast >= double(kDownIdleSecs)) {
+        finishDownlink();
+        return;
+      }
+      scheduleDownlinkIdleCheck();
+    });
+  }
+
+  void finishDownlink()
+  {
+    m_downActive = false;
+    const double rxSecs = duration<double>(m_downLastRx - m_downT0).count();
+    const double rcvdKbps = double(m_downRecvBytes) / 1024.0 / std::max(rxSecs, 1e-9);
+    say(QString("ble-bench central: DOWNLINK (notify) received %1 bytes in %2 s = %3 KB/s")
+            .arg(m_downRecvBytes)
+            .arg(rxSecs, 0, 'f', 3)
+            .arg(rcvdKbps, 0, 'f', 2));
+    // Tell peripheral to stop pumping (in case it hasn't hit its ceiling yet).
+    writeMessage(m_socket.get(), kMsgBenchEnd);
+    QTimer::singleShot(500, this, [] { QCoreApplication::quit(); });
+  }
+
+  void startDownlinkPhase()
+  {
+    say(QStringLiteral("ble-bench central: downlink phase requested (peer notify pumps until idle)"));
+    m_downRecvBytes = 0;
+    m_downActive = false; // becomes true on first DOWN_DATA arrival
+    writeMessage(m_socket.get(), kMsgDownBenchStart);
+    // Hard ceiling — if no DATA ever arrives, give up.
+    QTimer::singleShot(30000, this, [this] {
+      if (!m_downActive && m_downRecvBytes == 0) {
+        say(QStringLiteral("ble-bench central: downlink no data arrived in 30 s"));
+        QCoreApplication::exit(5);
+      }
+    });
+  }
+
   static constexpr int kPings = 30;
   static constexpr int kBenchSecs = 5;
   static constexpr int kBenchChunkBytes = 1024;
+  // Hard ceiling so a fast WinRT path doesn't queue megabytes that take
+  // minutes to drain through the link. 100 KB at 36 KB/s = ~3 s drain.
+  static constexpr int kBenchMaxBytes = 100 * 1024;
 
   IEventQueue *m_events;
   QString m_code;
@@ -474,6 +579,13 @@ private:
   steady_clock::time_point m_bwT0;
   uint64_t m_bwSubmitted = 0;
   bool m_reportSeen = false;
+
+  bool m_downActive = false;
+  steady_clock::time_point m_downT0;
+  steady_clock::time_point m_downLastRx;
+  uint64_t m_downRecvBytes = 0;
+  bool m_downReportSeen = false;
+  static constexpr int kDownIdleSecs = 3;
 };
 
 void usage(const char *exe)
