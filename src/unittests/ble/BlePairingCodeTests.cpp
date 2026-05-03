@@ -62,6 +62,41 @@ void BlePairingCodeTests::test_verify_rejectsAfterClear()
   QVERIFY(!code.verify(s));
 }
 
+void BlePairingCodeTests::test_adopt_setsCurrent()
+{
+  // adopt() injects a caller-supplied value (e.g. one persisted across
+  // server restarts via Settings::Server::BlePairingCode) without going
+  // through generate(). verify() must then accept the adopted value.
+  BlePairingCode code;
+  code.adopt(QStringLiteral("123456"));
+  QVERIFY(code.isSet());
+  QVERIFY(code.verify(QStringLiteral("123456")));
+}
+
+void BlePairingCodeTests::test_adopt_replacesGenerated()
+{
+  // Adopting after a generate() must replace the in-memory code so the
+  // previously-generated value is no longer accepted.
+  BlePairingCode code;
+  const QString generated = code.generate();
+  code.adopt(QStringLiteral("000000"));
+  QVERIFY(code.verify(QStringLiteral("000000")));
+  QVERIFY(!code.verify(generated));
+}
+
+void BlePairingCodeTests::test_adopt_emptyClears()
+{
+  // Adopting an empty string puts the code back into the unset state, so
+  // verify() rejects everything (mirrors the post-clear() contract used
+  // when the peripheral wipes the code after a successful pair).
+  BlePairingCode code;
+  code.adopt(QStringLiteral("123456"));
+  code.adopt(QString());
+  QVERIFY(!code.isSet());
+  QVERIFY(!code.verify(QStringLiteral("123456")));
+  QVERIFY(!code.verify(QString()));
+}
+
 void BlePairingCodeTests::test_hashPrefix_isStable()
 {
   const QByteArray a = BlePairingCode::hashPrefix(QStringLiteral("123456"));

@@ -4,6 +4,7 @@
 find_package(Qt6 ${REQUIRED_QT_VERSION} REQUIRED COMPONENTS Bluetooth)
 
 set(ble_sources
+  BleAddressParser.h
   BleFraming.cpp
   BleFraming.h
   BleListenSocket.cpp

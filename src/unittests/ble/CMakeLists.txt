@@ -24,3 +24,11 @@ create_test(
   SOURCE BleProtocolClassifierTests.cpp
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/ble"
 )
+
+create_test(
+  NAME BleAddressParserTests
+  DEPENDS ble
+  LIBS base common
+  SOURCE BleAddressParserTests.cpp
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/ble"
+)

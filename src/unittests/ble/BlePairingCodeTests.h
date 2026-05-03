@@ -17,6 +17,9 @@ private Q_SLOTS:
   void test_verify_matchesCurrent();
   void test_verify_rejectsMismatch();
   void test_verify_rejectsAfterClear();
+  void test_adopt_setsCurrent();
+  void test_adopt_replacesGenerated();
+  void test_adopt_emptyClears();
   void test_hashPrefix_isStable();
   void test_hashPrefix_isFourBytes();
   void test_generate_noTrivialCollisions();

@@ -39,6 +39,11 @@ public:
 
   int mtu() const;
 
+  // 48-bit BT address of the currently/last-connected peer; 0 if never
+  // connected. The host adapter's public MAC, suitable to persist as a
+  // remembered-peer hint for the next session's reconnect.
+  quint64 peerAddress() const;
+
 Q_SIGNALS:
   void connected();                          // pairing accepted, link ready
   void disconnected();                       // peer disconnected

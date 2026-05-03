@@ -10,6 +10,7 @@
 #include "base/EventTypes.h"
 #include "base/IEventQueue.h"
 #include "base/Log.h"
+#include "ble/BleAddressParser.h"
 #include "ble/BlePairingBroker.h"
 #include "ble/BlePairingCode.h"
 #include "ble/BleProtocolClassifier.h"
@@ -65,25 +66,13 @@ QString deviceIdForPersistence(const QBluetoothDeviceInfo &info)
   return info.address().toString();
 }
 
-// Parse the optional Settings::Client::DirectBleAddress (`"04:7F:0E:72:8E:39"`,
-// `"047F0E728E39"`, or upper/lower-case variants) into a 48-bit BT address.
-// Returns 0 when unset or malformed — the caller then falls back to the
-// scan-based discovery path. Stripping non-hex chars makes both the
-// colon-separated and bare-hex forms accepted.
+// Read the optional Settings::Client::DirectBleAddress key and forward to the
+// pure parser in BleAddressParser.h. The split keeps the parser unit-testable
+// without dragging in a Settings dependency.
 quint64 parseDirectBleAddress()
 {
-  const QString raw = Settings::value(Settings::Client::DirectBleAddress).toString();
-  QString hex;
-  hex.reserve(raw.size());
-  for (QChar c : raw) {
-    if (c.isLetterOrNumber())
-      hex.append(c);
-  }
-  if (hex.size() != 12)
-    return 0;
-  bool ok = false;
-  const quint64 v = hex.toULongLong(&ok, 16);
-  return ok ? v : 0;
+  return deskflow::ble::parseBleAddressString(
+      Settings::value(Settings::Client::DirectBleAddress).toString());
 }
 
 } // namespace
@@ -145,6 +134,24 @@ void BleSocketContext::startCentral(QString savedDeviceId, QString code)
     BlePairingBroker::instance().reportResult(true, QString());
     QTextStream(stdout) << "BLE_PAIRING:RESULT=accepted:" << Qt::endl;
     Settings::setValue(Settings::Client::PendingBleCode, QString());
+    // Persist the peer's BT address so the next BleSocket::connect() can pass
+    // it as the remembered-peer hint, allowing reconnect without a fresh PIN.
+    // Format as zero-padded 48-bit hex with colons (matches the pattern that
+    // parseDirectBleAddress() and the human-edited config also accept).
+    if (m_winrtCentral) {
+      const quint64 addr = m_winrtCentral->peerAddress();
+      if (addr != 0) {
+        QString mac = QString::asprintf("%02X:%02X:%02X:%02X:%02X:%02X",
+                                        static_cast<unsigned>((addr >> 40) & 0xFF),
+                                        static_cast<unsigned>((addr >> 32) & 0xFF),
+                                        static_cast<unsigned>((addr >> 24) & 0xFF),
+                                        static_cast<unsigned>((addr >> 16) & 0xFF),
+                                        static_cast<unsigned>((addr >> 8) & 0xFF),
+                                        static_cast<unsigned>(addr & 0xFF));
+        Settings::setValue(Settings::Client::RemoteBleDevice, mac);
+        LOG_NOTE("BLE central (WinRT): saved remembered peer %s", mac.toUtf8().constData());
+      }
+    }
     Settings::save();
     if (m_owner)
       m_owner->notifyConnected();

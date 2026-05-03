@@ -166,6 +166,9 @@ struct WinRtBleCentralBackend::Impl
   std::atomic<bool> running{false};
   std::atomic<int> mtu{64};
   std::atomic<bool> pairingAccepted{false};
+  // Peer's 48-bit BT address — captured in doConnect for the consumer to
+  // persist as a remembered-peer hint for the next session's reconnect.
+  std::atomic<uint64_t> peerAddress{0};
   QString pendingCode;
   QByteArray expectedHash;
   QString savedDeviceId;
@@ -302,6 +305,7 @@ struct WinRtBleCentralBackend::Impl
   void doConnect(uint64_t address)
   {
     LOG_NOTE("WinRtBleCentralBackend: connecting to %012llx", static_cast<unsigned long long>(address));
+    peerAddress.store(address);
     try {
       device = wbt::BluetoothLEDevice::FromBluetoothAddressAsync(address).get();
       if (!device) {
@@ -559,6 +563,11 @@ void WinRtBleCentralBackend::writeUpstream(const QByteArray &chunk)
 int WinRtBleCentralBackend::mtu() const
 {
   return m_impl->mtu.load();
+}
+
+quint64 WinRtBleCentralBackend::peerAddress() const
+{
+  return m_impl->peerAddress.load();
 }
 
 } // namespace deskflow::ble
