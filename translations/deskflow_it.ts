@@ -150,11 +150,6 @@ p, li { white-space: pre-wrap; }
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>The code resets every pairing session and is discarded once
-the remote connects. Keep this window open until paired.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Enter the 6-digit code shown on the host:</source>
         <translation type="unfinished"></translation>
     </message>
@@ -188,6 +183,19 @@ the remote connects. Keep this window open until paired.</source>
     </message>
     <message>
         <source>Code submitted. Starting client core…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>The code is reused across server restarts so the remote keeps
+the same paired PIN. Click Regenerate to rotate it.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Regenerate code</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Regenerating — restarting core…</source>
         <translation type="unfinished"></translation>
     </message>
 </context>
