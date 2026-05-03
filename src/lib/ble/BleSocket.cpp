@@ -65,6 +65,27 @@ QString deviceIdForPersistence(const QBluetoothDeviceInfo &info)
   return info.address().toString();
 }
 
+// Parse the optional Settings::Client::DirectBleAddress (`"04:7F:0E:72:8E:39"`,
+// `"047F0E728E39"`, or upper/lower-case variants) into a 48-bit BT address.
+// Returns 0 when unset or malformed — the caller then falls back to the
+// scan-based discovery path. Stripping non-hex chars makes both the
+// colon-separated and bare-hex forms accepted.
+quint64 parseDirectBleAddress()
+{
+  const QString raw = Settings::value(Settings::Client::DirectBleAddress).toString();
+  QString hex;
+  hex.reserve(raw.size());
+  for (QChar c : raw) {
+    if (c.isLetterOrNumber())
+      hex.append(c);
+  }
+  if (hex.size() != 12)
+    return 0;
+  bool ok = false;
+  const quint64 v = hex.toULongLong(&ok, 16);
+  return ok ? v : 0;
+}
+
 } // namespace
 
 //
@@ -145,7 +166,7 @@ void BleSocketContext::startCentral(QString savedDeviceId, QString code)
       LOG_NOTE("BLE central (WinRT): MTU=%d", v);
     }
   });
-  m_winrtCentral->start(savedDeviceId, code);
+  m_winrtCentral->start(savedDeviceId, code, parseDirectBleAddress());
   return;
 #endif
 

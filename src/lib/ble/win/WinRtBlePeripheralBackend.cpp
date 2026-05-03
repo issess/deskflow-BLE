@@ -484,9 +484,18 @@ struct WinRtBlePeripheralBackend::Impl
       return false;
     };
     auto logAttemptError = [](const char *label, const winrt::hresult_error &e) {
-      LOG_ERR("WinRT: attempt [%s] winrt::hresult_error 0x%08x msg=%ls",
-              label, static_cast<unsigned>(e.code().value), e.message().c_str());
+      // Avoid e.message() — on some adapters (advOffloadSupported=0) it can
+      // throw std::length_error("vector too long") from inside the WinRT
+      // string projection, which then propagates past this catch and aborts
+      // workerStart before the manufacturer-data publisher gets a chance to
+      // start. The hresult code alone is enough for diagnosis.
+      LOG_ERR("WinRT: attempt [%s] winrt::hresult_error 0x%08x", label,
+              static_cast<unsigned>(e.code().value));
     };
+    // The synchronous return of StartAdvertising can show Aborted while the
+    // adapter is mid-transition; the async StatusChanged event then flips to
+    // Started a few milliseconds later. Sleep briefly so logAttemptResult sees
+    // the settled state instead of the racy mid-transition value.
     auto attemptStartWithParams = [this, &logAttemptResult, &logAttemptError](
                                       const char *label, bool connectable, bool discoverable) -> bool {
       try {
@@ -495,6 +504,7 @@ struct WinRtBlePeripheralBackend::Impl
         p.IsConnectable(connectable);
         p.IsDiscoverable(discoverable);
         serviceProvider.StartAdvertising(p);
+        ::Sleep(250);
         return logAttemptResult(label);
       } catch (const winrt::hresult_error &e) {
         logAttemptError(label, e);

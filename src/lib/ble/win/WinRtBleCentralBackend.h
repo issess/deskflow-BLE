@@ -26,7 +26,11 @@ public:
   // Begin scan + connect + pair flow. `savedDeviceId` is empty for first-pair,
   // or a hex MAC for remembered-peer reconnect. `code` is the 6-digit pairing
   // code (empty when reconnecting a remembered peer).
-  void start(const QString &savedDeviceId, const QString &code);
+  // `directAddress` (optional, non-zero) bypasses the scan entirely and connects
+  // straight to that 48-bit BT address — for adapters whose peripheral-mode
+  // advertising can't be discovered via scan but can still accept a direct
+  // GATT connection by address.
+  void start(const QString &savedDeviceId, const QString &code, quint64 directAddress = 0);
 
   void stop();
 

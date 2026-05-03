@@ -207,10 +207,11 @@ struct WinRtBleCentralBackend::Impl
 
   // ---------------- worker thread ----------------
 
-  void doStart(QString savedId, QString code)
+  void doStart(QString savedId, QString code, quint64 directAddress)
   {
-    LOG_NOTE("WinRtBleCentralBackend: start savedId=%s codeLen=%d",
-             savedId.toUtf8().constData(), code.size());
+    LOG_NOTE("WinRtBleCentralBackend: start savedId=%s codeLen=%d directAddr=%012llx",
+             savedId.toUtf8().constData(), code.size(),
+             static_cast<unsigned long long>(directAddress));
     pendingCode = code;
     if (!code.isEmpty())
       expectedHash = BlePairingCode::hashPrefix(code);
@@ -218,6 +219,18 @@ struct WinRtBleCentralBackend::Impl
       expectedHash.clear();
     savedDeviceId = savedId;
     pairingAccepted.store(false);
+
+    // Direct-address bypass: skip the watcher and connect straight to the
+    // configured BT address. For adapters whose peripheral-mode advertising
+    // can't be discovered (e.g. advOffloadSupported=0 with an OS that
+    // doesn't surface our service UUID in the adv payload) this is the only
+    // way to bring up the link. The host must keep the public BT address
+    // stable (no Resolvable Private Address) for this to keep working.
+    if (directAddress != 0) {
+      LOG_NOTE("WinRtBleCentralBackend: direct-connect bypass (no scan)");
+      worker.post([this, directAddress] { doConnect(directAddress); });
+      return;
+    }
 
     try {
       watcher = wadv::BluetoothLEAdvertisementWatcher{};
@@ -525,11 +538,12 @@ WinRtBleCentralBackend::~WinRtBleCentralBackend()
   m_impl->worker.stop();
 }
 
-void WinRtBleCentralBackend::start(const QString &savedDeviceId, const QString &code)
+void WinRtBleCentralBackend::start(const QString &savedDeviceId, const QString &code, quint64 directAddress)
 {
   const QString sid = savedDeviceId;
   const QString c = code;
-  m_impl->worker.post([this, sid, c] { m_impl->doStart(sid, c); });
+  const quint64 da = directAddress;
+  m_impl->worker.post([this, sid, c, da] { m_impl->doStart(sid, c, da); });
 }
 
 void WinRtBleCentralBackend::stop()

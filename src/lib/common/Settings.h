@@ -45,6 +45,11 @@ public:
     // Ephemeral: GUI writes the 6-digit code here before starting core;
     // core reads and clears it during BLE connect.
     inline static const auto PendingBleCode = QStringLiteral("client/pendingBleCode");
+    // Optional: explicit 48-bit BT address (12 hex chars, e.g. "047F0E728E39"
+    // or "04:7F:0E:72:8E:39") for adapters whose peripheral-mode advertising
+    // can't be discovered via scan. When set, the central skips scanning and
+    // calls FromBluetoothAddressAsync directly.
+    inline static const auto DirectBleAddress = QStringLiteral("client/directBleAddress");
     inline static const auto XdpRestoreToken = QStringLiteral("client/xdpRestoreToken");
   };
   struct Core
@@ -226,6 +231,7 @@ private:
     , Settings::Client::XdpRestoreToken
     , Settings::Client::RemoteBleDevice
     , Settings::Client::PendingBleCode
+    , Settings::Client::DirectBleAddress
     , Settings::Core::CoreMode
     , Settings::Core::Interface
     , Settings::Core::LastVersion
