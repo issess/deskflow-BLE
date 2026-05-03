@@ -22,6 +22,11 @@ public:
   // Returns the code as a zero-padded 6-character string.
   QString generate();
 
+  // Replace the in-memory code with a caller-supplied value (e.g. one that
+  // was persisted in settings from a previous run). Caller is responsible
+  // for validating the format before calling.
+  void adopt(const QString &code);
+
   // Constant-time comparison against the currently held code.
   // Returns false if no code is currently held.
   bool verify(const QString &candidate) const;

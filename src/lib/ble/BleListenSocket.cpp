@@ -22,6 +22,7 @@
 #endif
 
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <QTextStream>
 #include <QThread>
 #include <QTimer>
@@ -118,7 +119,22 @@ void BlePeripheralContext::stop()
 
 void BlePeripheralContext::publishCode()
 {
-  m_currentCode = m_code.generate();
+  // Reuse a previously persisted PIN so a client with a fixed pendingBleCode
+  // keeps working across server restarts. Anything that is not exactly 6
+  // ASCII digits (empty, hand-edited garbage, leading whitespace) is treated
+  // as missing and replaced — self-healing.
+  static const QRegularExpression kSixDigits(QStringLiteral("^[0-9]{6}$"));
+  const QString saved = Settings::value(Settings::Server::BlePairingCode).toString();
+  if (kSixDigits.match(saved).hasMatch()) {
+    m_currentCode = saved;
+    m_code.adopt(saved);
+    LOG_NOTE("BLE: reusing persisted pairing PIN");
+  } else {
+    m_currentCode = m_code.generate();
+    Settings::setValue(Settings::Server::BlePairingCode, m_currentCode);
+    Settings::save();
+    LOG_NOTE("BLE: generated and persisted new pairing PIN");
+  }
   BlePairingBroker::instance().setActiveCode(m_currentCode);
   QTextStream(stdout) << "BLE_PAIRING:CODE=" << m_currentCode << Qt::endl;
   m_attempts = 0;

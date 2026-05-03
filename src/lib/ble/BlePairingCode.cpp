@@ -21,6 +21,11 @@ QString BlePairingCode::generate()
   return m_code;
 }
 
+void BlePairingCode::adopt(const QString &code)
+{
+  m_code = code;
+}
+
 bool BlePairingCode::verify(const QString &candidate) const
 {
   if (m_code.isEmpty() || candidate.size() != m_code.size())

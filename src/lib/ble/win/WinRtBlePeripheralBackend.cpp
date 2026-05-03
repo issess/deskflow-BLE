@@ -199,19 +199,27 @@ struct WinRtBlePeripheralBackend::Impl
   QString localName;
   QByteArray mfgPayload;
 
-  // Bounded outbound queue for DataDownstream notifies. Each notify takes
-  // ~100-130 ms over BLE; if the producer (server-side input events such as
-  // mouse moves) outpaces the link, the worker queue grows unbounded and
-  // critical messages like CALV (keep-alive) get stuck behind tens of stale
-  // mouse-move chunks. The client's keep-alive alarm (9 s default) then trips
-  // and reports "server is dead". We cap pending downstream chunks and drop
-  // oldest on overflow — stale mouse positions are the expected casualty.
-  static constexpr size_t kDownstreamQueueCap = 16;
+  // Bounded outbound queue for DataDownstream notifies. Producer-side guard:
+  // if the upper layer pushes faster than the BLE link can drain, we coalesce
+  // mouse-move chunks first, then drop oldest on overflow so critical frames
+  // (keep-alives, key events) aren't stuck behind stale mouse positions.
+  // The cap is generous because pipelined notifies (see kDownstreamInflightWindow)
+  // drain the queue at link rate; the cap only matters during transient bursts.
+  static constexpr size_t kDownstreamQueueCap = 64;
+  // Outstanding NotifyValueAsync ops we keep in flight to the OS BT stack.
+  // The stack pipelines these to the link layer at hardware speed; serialising
+  // each via .get() instead of letting them overlap was capping throughput at
+  // ~12 KB/s. 16 in flight saturates the 1 Mbps PHY without unbounded host
+  // queueing.
+  static constexpr int kDownstreamInflightWindow = 16;
   std::mutex dsMu;
   std::deque<QByteArray> dsQueue;
   bool dsPumpScheduled = false;
   std::atomic<uint64_t> dsDroppedTotal{0};
   std::atomic<uint64_t> dsCoalescedMouseTotal{0};
+  // Heap-allocated so Completed lambdas can decrement safely even if Impl is
+  // torn down before the OS finalises the async op.
+  std::shared_ptr<std::atomic<int>> dsInflight = std::make_shared<std::atomic<int>>(0);
 
   void emitStartFailed(const QString &reason)
   {
@@ -791,6 +799,80 @@ struct WinRtBlePeripheralBackend::Impl
     }
   }
 
+  // Pipelined fire-and-forget notify on dataDownstream. Mirrors the central
+  // backend's WriteValueAsync pattern (WinRtBleCentralBackend.cpp). Increments
+  // the shared in-flight counter on submit; the Completed callback decrements
+  // it. The pump (workerPumpDownstream) gates submissions on this counter so
+  // we never let more than kDownstreamInflightWindow ops sit in the OS stack.
+  void workerSubmitDownstreamAsync(const QByteArray &chunk)
+  {
+    if (!dataDownstream) {
+      LOG_WARN("WinRT: workerSubmitDownstreamAsync dropped %d bytes (characteristic null)",
+               chunk.size());
+      return;
+    }
+    refreshNegotiatedMtuFromSubscribers();
+    std::shared_ptr<std::atomic<int>> inflight = dsInflight;
+    int sz = chunk.size();
+    try {
+      auto buf = qByteArrayToIBuffer(chunk);
+      auto op = dataDownstream.NotifyValueAsync(buf);
+      inflight->fetch_add(1);
+      // Completed runs on the Windows thread pool. Capture only the shared
+      // atomic so it stays valid regardless of Impl lifetime.
+      op.Completed(
+          [inflight, sz](
+              wfnd::IAsyncOperation<wfc::IVectorView<wgap::GattClientNotificationResult>> const &asyncOp,
+              wfnd::AsyncStatus status) {
+            inflight->fetch_sub(1);
+            if (status != wfnd::AsyncStatus::Completed) {
+              try {
+                asyncOp.GetResults();
+              } catch (const winrt::hresult_error &e) {
+                LOG_DEBUG("WinRT: notify completion hr=0x%08x size=%d",
+                          static_cast<unsigned>(e.code().value), sz);
+              } catch (...) {
+              }
+            }
+          });
+    } catch (const winrt::hresult_error &e) {
+      // Synchronous throw (E_ILLEGAL_METHOD_CALL etc.) — drop chunk; the central's
+      // BleFramingReader handles gaps via packet-id resync.
+      LOG_DEBUG("WinRT: NotifyValueAsync issue threw hr=0x%08x size=%d",
+                static_cast<unsigned>(e.code().value), chunk.size());
+    } catch (const std::exception &e) {
+      LOG_WARN("WinRT: NotifyValueAsync issue threw std::exception: %s size=%d",
+               e.what(), chunk.size());
+    }
+  }
+
+  // Drain dsQueue, submitting fire-and-forget notifies up to the in-flight
+  // window. When the window is full, briefly yield and re-check — the worker
+  // thread is dedicated to BLE I/O so a sub-millisecond sleep does not starve
+  // anything. Lifetime safe: only touches Impl members from the worker thread,
+  // which is stopped before Impl is destroyed.
+  void workerPumpDownstream()
+  {
+    while (true) {
+      QByteArray next;
+      {
+        std::lock_guard<std::mutex> lock(dsMu);
+        if (dsQueue.empty()) {
+          dsPumpScheduled = false;
+          return;
+        }
+        next = dsQueue.front();
+        dsQueue.pop_front();
+      }
+      // Backpressure on the OS stack — wait for an in-flight op to complete
+      // before we submit the next one.
+      while (dsInflight->load() >= kDownstreamInflightWindow) {
+        ::Sleep(1);
+      }
+      workerSubmitDownstreamAsync(next);
+    }
+  }
+
   size_t coalescePendingMouseMoveLocked()
   {
     size_t removed = 0;
@@ -925,21 +1007,7 @@ void WinRtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
   }
   if (needPump) {
     auto *impl = m_impl.get();
-    m_impl->worker.post([impl] {
-      while (true) {
-        QByteArray next;
-        {
-          std::lock_guard<std::mutex> lock(impl->dsMu);
-          if (impl->dsQueue.empty()) {
-            impl->dsPumpScheduled = false;
-            return;
-          }
-          next = impl->dsQueue.front();
-          impl->dsQueue.pop_front();
-        }
-        impl->workerNotify(impl->dataDownstream, next);
-      }
-    });
+    m_impl->worker.post([impl] { impl->workerPumpDownstream(); });
   }
 }
 

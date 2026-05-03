@@ -45,10 +45,16 @@ Q_SIGNALS:
   // user to dismiss the dialog and press Start separately.
   void remoteCodeSubmitted();
 
+  // Emitted (host mode) when the user clicks "Regenerate code". The dialog
+  // wipes the persisted PIN; the main window restarts the core so the new
+  // run regenerates and re-publishes a fresh code.
+  void regenerateRequested();
+
 private Q_SLOTS:
   void onCodeChanged(const QString &code);
   void onPairingResult(bool accepted, const QString &reason);
   void onSubmitRemoteCode();
+  void onRegenerateClicked();
 
 private:
   void buildHostUi();
@@ -61,5 +67,6 @@ private:
   QLabel *m_statusLabel = nullptr;
   QLineEdit *m_codeInput = nullptr;
   QPushButton *m_submitButton = nullptr;
+  QPushButton *m_regenButton = nullptr;
   QDialogButtonBox *m_buttonBox = nullptr;
 };

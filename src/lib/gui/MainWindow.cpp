@@ -166,6 +166,14 @@ MainWindow::MainWindow()
         if (!m_coreProcess.isStarted())
           startCore();
       });
+      connect(dlg, &BlePairingDialog::regenerateRequested, this, [this] {
+        // Wipe of the persisted PIN already happened in the dialog; restart
+        // (or fresh-start) the core so its next publishCode regenerates.
+        if (m_coreProcess.isStarted())
+          m_coreProcess.restart();
+        else
+          startCore();
+      });
       connect(dlg, &QDialog::finished, this, [this] { applyTransportToHostnameField(); });
       dlg->show();
       if (mode == BlePairingDialog::Mode::Host && !m_coreProcess.isStarted()) {

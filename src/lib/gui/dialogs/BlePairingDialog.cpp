@@ -20,6 +20,7 @@
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
 #include <QStackedWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 BlePairingDialog::BlePairingDialog(Mode mode, QWidget *parent) : QDialog(parent), m_mode(mode)
@@ -74,7 +75,7 @@ void BlePairingDialog::buildHostUi()
   title->setAlignment(Qt::AlignCenter);
   layout->addWidget(title);
 
-  m_hostCodeLabel = new QLabel(QStringLiteral("——— ———"), this);
+  m_hostCodeLabel = new QLabel(QStringLiteral("——————"), this);
   QFont f = m_hostCodeLabel->font();
   f.setFamily(QStringLiteral("Consolas"));
   f.setStyleHint(QFont::Monospace);
@@ -86,12 +87,20 @@ void BlePairingDialog::buildHostUi()
   layout->addWidget(m_hostCodeLabel);
 
   auto *hint = new QLabel(
-      tr("The code resets every pairing session and is discarded once\n"
-         "the remote connects. Keep this window open until paired."),
+      tr("The code is reused across server restarts so the remote keeps\n"
+         "the same paired PIN. Click Regenerate to rotate it."),
       this
   );
   hint->setAlignment(Qt::AlignCenter);
   layout->addWidget(hint);
+
+  m_regenButton = new QPushButton(tr("Regenerate code"), this);
+  connect(m_regenButton, &QPushButton::clicked, this, &BlePairingDialog::onRegenerateClicked);
+  auto *btnRow = new QHBoxLayout();
+  btnRow->addStretch();
+  btnRow->addWidget(m_regenButton);
+  btnRow->addStretch();
+  layout->addLayout(btnRow);
 
   // Ensure transport is set to BLE so the running core (if user starts it
   // now) uses the BLE listener path.
@@ -141,7 +150,7 @@ void BlePairingDialog::onCodeChanged(const QString &code)
   if (m_mode != Mode::Host || !m_hostCodeLabel)
     return;
   if (code.isEmpty()) {
-    m_hostCodeLabel->setText(QStringLiteral("——— ———"));
+    m_hostCodeLabel->setText(QStringLiteral("——————"));
     if (m_statusLabel)
       m_statusLabel->setText(tr("Waiting for core to start advertising…"));
   } else {
@@ -197,9 +206,27 @@ void BlePairingDialog::onSubmitRemoteCode()
   Q_EMIT remoteCodeSubmitted();
 }
 
+void BlePairingDialog::onRegenerateClicked()
+{
+  // Wipe the persisted PIN so the next BleListenSocket::publishCode() falls
+  // through to generate-and-save. The main window restarts the core so the
+  // new run actually re-publishes a fresh code; without that the running
+  // core would keep advertising the old (in-memory) code.
+  Settings::setValue(Settings::Server::BlePairingCode, QString());
+  Settings::save();
+  if (m_hostCodeLabel)
+    m_hostCodeLabel->setText(QStringLiteral("——————"));
+  if (m_statusLabel)
+    m_statusLabel->setText(tr("Regenerating — restarting core…"));
+  if (m_regenButton) {
+    m_regenButton->setEnabled(false);
+    // Re-enable after a short delay so the user can rotate again later.
+    QTimer::singleShot(2000, m_regenButton, [this] { if (m_regenButton) m_regenButton->setEnabled(true); });
+  }
+  Q_EMIT regenerateRequested();
+}
+
 QString BlePairingDialog::formatCode(const QString &raw)
 {
-  if (raw.size() != 6)
-    return raw;
-  return raw.left(3) + QStringLiteral("  ") + raw.mid(3);
+  return raw;
 }

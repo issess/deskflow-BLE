@@ -116,6 +116,11 @@ public:
     // the BLE peripheral context auto-accepts a remembered-peer reconnect
     // (i.e. a central that subscribes without writing the per-session code).
     inline static const auto HasBlePairedPeer = QStringLiteral("server/hasBlePairedPeer");
+    // Persisted 6-digit BLE pairing PIN. Generated lazily on first server
+    // start, reused on subsequent starts so a client config with a fixed
+    // pendingBleCode keeps working across server restarts. Cleared by the
+    // --regen-ble-code CLI flag to force a fresh PIN.
+    inline static const auto BlePairingCode = QStringLiteral("server/blePairingCode");
   };
 
   // Enums types used in settings
@@ -267,6 +272,8 @@ private:
     , Settings::Server::ExternalConfig
     , Settings::Server::ExternalConfigFile
     , Settings::Server::Protocol
+    , Settings::Server::HasBlePairedPeer
+    , Settings::Server::BlePairingCode
   };
 
   // When checking the default values this list contains the ones that default to false.

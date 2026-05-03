@@ -51,6 +51,14 @@ void CoreArgParser::parse()
   if (m_parser.isSet(CoreArgs::configOption)) {
     Settings::setSettingsFile(m_parser.value(CoreArgs::configOption));
   }
+
+  // Wipe the persisted BLE pairing PIN so the BleListenSocket regenerates one
+  // on start. Server-only — silently ignored in client mode where the key is
+  // unused.
+  if (m_serverMode && m_parser.isSet(CoreArgs::regenBleCodeOption)) {
+    Settings::setValue(Settings::Server::BlePairingCode, QString());
+    Settings::save();
+  }
 }
 
 [[noreturn]] void CoreArgParser::showHelpText() const
