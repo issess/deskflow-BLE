@@ -231,7 +231,9 @@ struct WinRtBleCentralBackend::Impl
     // stable (no Resolvable Private Address) for this to keep working.
     if (directAddress != 0) {
       LOG_NOTE("WinRtBleCentralBackend: direct-connect bypass (no scan)");
-      worker.post([this, directAddress] { doConnect(directAddress); });
+      worker.post([this, directAddress] {
+        doConnect(directAddress, wbt::BluetoothAddressType::Public);
+      });
       return;
     }
 
@@ -286,8 +288,10 @@ struct WinRtBleCentralBackend::Impl
       return;
 
     const uint64_t addr = args.BluetoothAddress();
-    LOG_NOTE("WinRtBleCentralBackend: advertisement match addr=%012llx hashOk=%d serviceMatch=%d magic=%d",
-             static_cast<unsigned long long>(addr), hashOk, serviceMatch, magicMatch);
+    const wbt::BluetoothAddressType addrType = args.BluetoothAddressType();
+    LOG_NOTE(
+        "WinRtBleCentralBackend: advertisement match addr=%012llx addrType=%d hashOk=%d serviceMatch=%d magic=%d",
+        static_cast<unsigned long long>(addr), static_cast<int>(addrType), hashOk, serviceMatch, magicMatch);
 
     // Stop scan, hand off to connect on the worker.
     if (watcher) {
@@ -299,15 +303,16 @@ struct WinRtBleCentralBackend::Impl
       tokAdvert = {};
       watcher = wadv::BluetoothLEAdvertisementWatcher{nullptr};
     }
-    worker.post([this, addr] { doConnect(addr); });
+    worker.post([this, addr, addrType] { doConnect(addr, addrType); });
   }
 
-  void doConnect(uint64_t address)
+  void doConnect(uint64_t address, wbt::BluetoothAddressType addressType)
   {
-    LOG_NOTE("WinRtBleCentralBackend: connecting to %012llx", static_cast<unsigned long long>(address));
+    LOG_NOTE("WinRtBleCentralBackend: connecting to %012llx (addrType=%d)",
+             static_cast<unsigned long long>(address), static_cast<int>(addressType));
     peerAddress.store(address);
     try {
-      device = wbt::BluetoothLEDevice::FromBluetoothAddressAsync(address).get();
+      device = wbt::BluetoothLEDevice::FromBluetoothAddressAsync(address, addressType).get();
       if (!device) {
         emitConnectFailed(QStringLiteral("FromBluetoothAddressAsync returned null"));
         return;
