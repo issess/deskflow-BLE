@@ -32,3 +32,21 @@ create_test(
   SOURCE BleAddressParserTests.cpp
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/ble"
 )
+
+if(WIN32)
+  # OpenSSL::applink must be linked directly to the test executable on
+  # Windows: applink.c contains the OpenSSL/MSVC CRT bridge thunks and
+  # they only work when compiled into the same module as the OpenSSL
+  # callers (INTERFACE_SOURCES don't propagate transitively through
+  # static libs). version is needed for arch's ArchMiscWindows.
+  find_package(OpenSSL ${REQUIRED_OPENSSL_VERSION} REQUIRED COMPONENTS SSL Crypto)
+  set(ble_secure_extra_libs version OpenSSL::applink)
+endif()
+
+create_test(
+  NAME BleSecureSocketTests
+  DEPENDS ble
+  LIBS base common net arch mt io ${ble_secure_extra_libs}
+  SOURCE BleSecureSocketTests.cpp
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/ble"
+)

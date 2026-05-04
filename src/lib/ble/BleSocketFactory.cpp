@@ -8,6 +8,8 @@
 
 #include "base/Log.h"
 #include "ble/BleListenSocket.h"
+#include "ble/BleSecureListenSocket.h"
+#include "ble/BleSecureSocket.h"
 #include "ble/BleSocket.h"
 
 namespace deskflow::ble {
@@ -16,15 +18,23 @@ BleSocketFactory::BleSocketFactory(IEventQueue *events) : m_events(events)
 {
 }
 
-IDataSocket *BleSocketFactory::create(IArchNetwork::AddressFamily, SecurityLevel) const
+IDataSocket *BleSocketFactory::create(IArchNetwork::AddressFamily, SecurityLevel level) const
 {
-  LOG_NOTE("BleSocketFactory::create (central BleSocket)");
+  if (level != SecurityLevel::PlainText) {
+    LOG_NOTE("BleSocketFactory::create (BleSecureSocket level=%d)", static_cast<int>(level));
+    return new BleSecureSocket(m_events, level);
+  }
+  LOG_NOTE("BleSocketFactory::create (BleSocket plaintext)");
   return new BleSocket(m_events);
 }
 
-IListenSocket *BleSocketFactory::createListen(IArchNetwork::AddressFamily, SecurityLevel) const
+IListenSocket *BleSocketFactory::createListen(IArchNetwork::AddressFamily, SecurityLevel level) const
 {
-  LOG_NOTE("BleSocketFactory::createListen");
+  if (level != SecurityLevel::PlainText) {
+    LOG_NOTE("BleSocketFactory::createListen (BleSecureListenSocket level=%d)", static_cast<int>(level));
+    return new BleSecureListenSocket(m_events, level);
+  }
+  LOG_NOTE("BleSocketFactory::createListen (BleListenSocket plaintext)");
   return new BleListenSocket(m_events);
 }
 

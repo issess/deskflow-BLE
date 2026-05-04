@@ -518,16 +518,46 @@ struct WinRtBleCentralBackend::Impl
   {
     if (!chDataUpstream)
       return;
-    try {
-      auto op = chDataUpstream.WriteValueAsync(toIBuffer(chunk),
-                                               wgap::GattWriteOption::WriteWithoutResponse);
-      // Truly fire-and-forget — do NOT call .get(). The OS BT stack will
-      // pipeline these to the link layer at hardware speed.
-      op.Completed([](auto const &, wfnd::AsyncStatus) {});
-    } catch (const winrt::hresult_error &e) {
-      LOG_WARN("WinRtBleCentralBackend: write hr=0x%08x %ls",
-               static_cast<unsigned>(e.code().value), e.message().c_str());
-    } catch (...) {
+    // GATT WriteWithResponse with synchronous .get(). The ATT-level ack is
+    // what gives us actual end-to-end delivery confirmation — WinRT's
+    // .get() on WriteWithoutResponse only confirms the OS BT stack
+    // accepted the request, leaving room for silent LL drops to corrupt
+    // the inbound TLS record stream on the peer (a single missing byte
+    // fails MAC verification and tears the connection down).
+    // Per-chunk RTT is ~one Connection Event (7.5–15 ms with
+    // ThroughputOptimized parameters). For Deskflow's typical sparse
+    // input events (mouse moves at 60–120 Hz, keystrokes <30 Hz),
+    // each write completes well within the inter-event gap, so the
+    // user-visible end-to-end latency is unchanged versus async — both
+    // are LL-bound for the wire transit anyway. Bulk transfers cap out
+    // around 6–12 KB/s, which matches the bench-measured BLE limit.
+    constexpr int kMaxAttempts = 5;
+    constexpr DWORD kBackoffMs = 1;
+    for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+      try {
+        auto buf = toIBuffer(chunk);
+        const auto status =
+            chDataUpstream.WriteValueAsync(buf, wgap::GattWriteOption::WriteWithResponse).get();
+        if (status != wgap::GattCommunicationStatus::Success) {
+          LOG_WARN("WinRtBleCentralBackend: write status=%d size=%d attempt=%d",
+                   static_cast<int>(status), chunk.size(), attempt);
+        }
+        return;
+      } catch (const winrt::hresult_error &e) {
+        const auto hr = static_cast<unsigned>(e.code().value);
+        const bool retryable = (hr == 0x8000000E /* E_ILLEGAL_METHOD_CALL */);
+        if (retryable && attempt < kMaxAttempts) {
+          ::Sleep(kBackoffMs * attempt);
+          continue;
+        }
+        LOG_WARN("WinRtBleCentralBackend: write hr=0x%08x size=%d attempts=%d",
+                 hr, chunk.size(), attempt);
+        return;
+      } catch (const std::exception &e) {
+        LOG_WARN("WinRtBleCentralBackend: write threw std::exception: %s size=%d",
+                 e.what(), chunk.size());
+        return;
+      }
     }
   }
 };

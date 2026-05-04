@@ -444,8 +444,7 @@ ClientListener *ServerApp::openClientListener(const NetworkAddress &address)
 {
   using enum SecurityLevel;
   auto securityLevel = PlainText;
-  const bool isBle = Settings::value(Settings::Core::Transport).toString() == QStringLiteral("ble");
-  if (!isBle && Settings::value(Settings::Security::TlsEnabled).toBool()) {
+  if (Settings::value(Settings::Security::TlsEnabled).toBool()) {
     if (Settings::value(Settings::Security::CheckPeers).toBool()) {
       securityLevel = PeerAuth;
     } else {
