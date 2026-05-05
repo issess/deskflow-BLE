@@ -119,6 +119,10 @@ void BleSocketContext::startCentral(QString savedDeviceId, QString code)
   m_savedDeviceId = savedDeviceId;
   m_pairingAccepted = false;
 
+  m_upstreamLossless = Settings::value(Settings::Core::BleStreamLossless).toBool();
+  LOG_NOTE("BLE central: upstream mode = %s",
+           m_upstreamLossless ? "lossless" : "lossy");
+
   if (!savedDeviceId.isEmpty() && code.isEmpty()) {
     LOG_NOTE("BLE central: have remembered peer %s — will match it during scan",
              savedDeviceId.toUtf8().constData());
@@ -128,6 +132,7 @@ void BleSocketContext::startCentral(QString savedDeviceId, QString code)
   // Windows: use direct WinRT central backend. Bypasses Qt's QLowEnergyController
   // entirely so the upstream-write path can call WriteValueAsync truly async.
   m_winrtCentral = new WinRtBleCentralBackend(this);
+  m_winrtCentral->setUpstreamLossless(m_upstreamLossless);
   QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::connected, this, [this] {
     m_pairingAccepted = true;
     BlePairingBroker::instance().clearPendingCode();
@@ -614,7 +619,19 @@ void BleSocketContext::drainCentralWriteQueue()
     m_centralWriteQueue.clear();
     return;
   }
-  // Burst-drain. WriteWithoutResponse doesn't reliably fire
+  if (m_upstreamLossless) {
+    // Lossless: WriteWithResponse, one chunk in flight at a time. The next
+    // dequeue waits for characteristicWritten in onCharacteristicWritten.
+    if (m_centralWriteInFlight)
+      return;
+    const QByteArray chunk = m_centralWriteQueue.dequeue();
+    LOG_DEBUG("BLE central: writing upstream chunk(lossless) len=%d queued=%d",
+              chunk.size(), m_centralWriteQueue.size());
+    m_centralWriteInFlight = true;
+    m_service->writeCharacteristic(ch, chunk, QLowEnergyService::WriteWithResponse);
+    return;
+  }
+  // Lossy burst-drain. WriteWithoutResponse doesn't reliably fire
   // characteristicWritten on Qt 6 / Windows, so we can't gate on per-write
   // confirmation. Cap each burst to keep the OS BLE buffer from overflowing
   // and yield via QTimer::singleShot(0) between bursts so the event loop
@@ -623,14 +640,15 @@ void BleSocketContext::drainCentralWriteQueue()
   int sent = 0;
   while (sent < kBurstChunks && !m_centralWriteQueue.isEmpty()) {
     const QByteArray chunk = m_centralWriteQueue.dequeue();
-    LOG_DEBUG("BLE central: writing upstream chunk len=%d queued=%d", chunk.size(), m_centralWriteQueue.size());
+    LOG_DEBUG("BLE central: writing upstream chunk(lossy) len=%d queued=%d",
+              chunk.size(), m_centralWriteQueue.size());
     m_service->writeCharacteristic(ch, chunk, QLowEnergyService::WriteWithoutResponse);
     ++sent;
   }
   if (!m_centralWriteQueue.isEmpty()) {
     QMetaObject::invokeMethod(this, &BleSocketContext::drainCentralWriteQueue, Qt::QueuedConnection);
   }
-  m_centralWriteInFlight = false; // gate retained for source compat; not used
+  m_centralWriteInFlight = false; // unused in lossy mode
 }
 
 void BleSocketContext::onCharacteristicWritten(const QLowEnergyCharacteristic &ch, const QByteArray &value)
@@ -638,6 +656,10 @@ void BleSocketContext::onCharacteristicWritten(const QLowEnergyCharacteristic &c
   if (m_role != Role::Central || ch.uuid() != kDataUpstreamCharUuid)
     return;
   LOG_DEBUG("BLE central: upstream chunk written len=%d remaining=%d", value.size(), m_centralWriteQueue.size());
+  // Only the lossless path gates on this signal; in lossy mode it may not
+  // fire reliably and we drain at burst rate instead.
+  if (!m_upstreamLossless)
+    return;
   m_centralWriteInFlight = false;
   drainCentralWriteQueue();
 }

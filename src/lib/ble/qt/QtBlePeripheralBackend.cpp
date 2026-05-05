@@ -198,6 +198,20 @@ void QtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
   m_service->writeCharacteristic(ch, chunk);
 }
 
+void QtBlePeripheralBackend::setDownstreamLossless(bool lossless)
+{
+  // Qt's QLowEnergyService::writeCharacteristic() on a notify char is
+  // fire-and-forget — there is no public ATT-ack hook. Honoring "lossless"
+  // would require switching the characteristic to Indicate (ATT-confirmed)
+  // which is a larger change with client-side CCC implications. For now,
+  // accept the call and log once if the user requested lossless so it's
+  // visible in the log without spamming.
+  if (lossless && !m_losslessWarned) {
+    LOG_WARN("Qt peripheral: downstream lossless requested but not supported on this backend; running fire-and-forget notify");
+    m_losslessWarned = true;
+  }
+}
+
 void QtBlePeripheralBackend::onServiceCharacteristicChanged(
     const QLowEnergyCharacteristic &ch, const QByteArray &value)
 {

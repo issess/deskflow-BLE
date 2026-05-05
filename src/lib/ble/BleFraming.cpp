@@ -6,6 +6,8 @@
 
 #include "ble/BleFraming.h"
 
+#include "base/Log.h"
+
 #include <QtEndian>
 #include <cstring>
 
@@ -108,6 +110,14 @@ BleFramingReader::FeedResult BleFramingReader::feedChunk(const QByteArray &chunk
   // p[7] reserved
   const quint32 declaredLen = readBe32(p + 8);
   const int actualPayloadLen = chunk.size() - BleFramingWriter::kHeaderSize;
+
+  LOG_DEBUG1("BleFraming::feedChunk size=%d packetId=%u seq=%u/%u flags=0x%02x declaredLen=%u "
+             "lastAcceptedId=%u assembling=%d currentId=%u",
+             chunk.size(), static_cast<unsigned>(packetId),
+             static_cast<unsigned>(chunkSeq), static_cast<unsigned>(chunkCount),
+             static_cast<unsigned>(flags), static_cast<unsigned>(declaredLen),
+             static_cast<unsigned>(m_lastAcceptedId), static_cast<int>(m_assembling),
+             static_cast<unsigned>(m_currentId));
 
   // Sanity check: declared length must match actual chunk payload length and
   // chunkCount must be at least 1; chunkSeq must be inside the count.

@@ -34,6 +34,7 @@ public:
   {
     return m_mtu;
   }
+  void setDownstreamLossless(bool lossless) override;
 
 private Q_SLOTS:
   void onServiceCharacteristicChanged(const QLowEnergyCharacteristic &ch, const QByteArray &value);
@@ -50,6 +51,7 @@ private:
   int m_advRetry = 0;
   QTimer *m_advRetryTimer = nullptr;
   bool m_started = false;
+  bool m_losslessWarned = false;
 };
 
 } // namespace deskflow::ble

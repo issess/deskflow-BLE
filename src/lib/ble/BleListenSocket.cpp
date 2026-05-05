@@ -20,6 +20,9 @@
 #ifdef Q_OS_WIN
 #include "ble/win/WinRtBlePeripheralBackend.h"
 #endif
+#if defined(Q_OS_LINUX)
+#include "ble/linux/BluezBlePeripheralBackend.h"
+#endif
 
 #include <QCoreApplication>
 #include <QRegularExpression>
@@ -33,8 +36,8 @@ namespace {
 
 IBlePeripheralBackend *createBackend(QObject *parent)
 {
-#ifdef Q_OS_WIN
   const auto backend = Settings::value(Settings::Core::BleBackend).toString().toLower();
+#if defined(Q_OS_WIN)
   if (backend == QStringLiteral("qt")) {
     LOG_NOTE("BLE peripheral backend selected: QtBluetooth");
     return new QtBlePeripheralBackend(parent);
@@ -43,7 +46,17 @@ IBlePeripheralBackend *createBackend(QObject *parent)
   // Windows: use direct C++/WinRT path. Qt's own peripheral backend on
   // Windows fails on a wide range of consumer BT adapters.
   return new WinRtBlePeripheralBackend(parent);
+#elif defined(Q_OS_LINUX)
+  if (backend == QStringLiteral("bluez")) {
+    LOG_NOTE("BLE peripheral backend selected: BlueZ-DBus");
+    // Linux opt-in: speak org.bluez directly via Qt6::DBus instead of going
+    // through Qt's BlueZ wrapper.
+    return new BluezBlePeripheralBackend(parent);
+  }
+  LOG_NOTE("BLE peripheral backend selected: QtBluetooth");
+  return new QtBlePeripheralBackend(parent);
 #else
+  Q_UNUSED(backend);
   LOG_NOTE("BLE peripheral backend selected: QtBluetooth");
   return new QtBlePeripheralBackend(parent);
 #endif
@@ -88,6 +101,8 @@ bool BlePeripheralContext::start()
   publishCode();
 
   m_backend = createBackend(this);
+  m_backend->setDownstreamLossless(
+      Settings::value(Settings::Core::BleStreamLossless).toBool());
   QObject::connect(m_backend, &IBlePeripheralBackend::started, this, &BlePeripheralContext::onBackendStarted);
   QObject::connect(m_backend, &IBlePeripheralBackend::startFailed, this,
                    &BlePeripheralContext::onBackendStartFailed);

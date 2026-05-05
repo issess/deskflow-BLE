@@ -27,7 +27,7 @@ class QLowEnergyCharacteristic;
 
 namespace deskflow::ble {
 class IBlePeripheralBackend;
-class WinRtBleCentralBackend;
+class IBleCentralBackend;
 }
 
 namespace deskflow::ble {
@@ -118,10 +118,17 @@ private:
   QString m_connectedDeviceId;
   QQueue<QByteArray> m_centralWriteQueue;
   bool m_centralWriteInFlight = false;
-  // Windows-only fast path. When set, all central-side scan/connect/pair/write
-  // bypasses Qt's QLowEnergyController and goes through WinRT directly. The
-  // Qt-specific m_discovery/m_centralCtl fields above are unused in that mode.
-  deskflow::ble::WinRtBleCentralBackend *m_winrtCentral = nullptr;
+  // Default true: WriteWithResponse with per-write characteristicWritten
+  // gating (m_centralWriteInFlight) — ATT-acked, lossless, ~one connection-
+  // event per chunk. False: WriteWithoutResponse + 16-chunk burst, fire-and-
+  // forget. Lossy mode trades reliability for throughput and is incompatible
+  // with TLS-on-BLE.
+  bool m_upstreamLossless = true;
+  // Direct (non-Qt) central backend. When set, scan/connect/pair/write all
+  // bypass Qt's QLowEnergyController. Concrete impls: WinRtBleCentralBackend
+  // on Windows, BluezBleCentralBackend on Linux. The Qt-specific m_discovery /
+  // m_centralCtl fields above are unused in that mode.
+  deskflow::ble::IBleCentralBackend *m_directCentral = nullptr;
   int m_scanSeen = 0;     // total devices scanned (any type)
   int m_scanLeSeen = 0;   // LE-capable devices
   int m_scanMagicHit = 0; // matched Deskflow magic (correct or wrong hash)

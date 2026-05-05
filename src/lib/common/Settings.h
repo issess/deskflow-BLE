@@ -60,6 +60,13 @@ public:
     inline static const auto Port = QStringLiteral("core/port");
     inline static const auto Transport = QStringLiteral("core/transport"); // "tcp" | "ble"
     inline static const auto BleBackend = QStringLiteral("core/bleBackend"); // "winrt" | "qt"
+    // BLE transport reliability. Default true. Each host applies this key to
+    // the direction it *sends* — when running as server (peripheral) it gates
+    // GATT notify between sync .get() (lossless) and fire-and-forget (lossy);
+    // when running as client (central) it gates GATT write between
+    // WriteWithResponse (lossless) and WriteWithoutResponse (lossy). Lossless
+    // avoids the BleFraming drop-and-resync that breaks TLS record alignment.
+    inline static const auto BleStreamLossless = QStringLiteral("core/bleStreamLossless");
     inline static const auto PreventSleep = QStringLiteral("core/preventSleep");
     inline static const auto ProcessMode = QStringLiteral("core/processMode");
     inline static const auto ComputerName = QStringLiteral("core/computerName");
@@ -238,6 +245,7 @@ private:
     , Settings::Core::Port
     , Settings::Core::Transport
     , Settings::Core::BleBackend
+    , Settings::Core::BleStreamLossless
     , Settings::Core::PreventSleep
     , Settings::Core::ProcessMode
     , Settings::Core::EnableEnterCommand
@@ -312,6 +320,7 @@ private:
     , Settings::Gui::SymbolicTrayIcon
     , Settings::Security::TlsEnabled
     , Settings::Security::CheckPeers
+    , Settings::Core::BleStreamLossless
   };
 
   // Settings saved in our State file

@@ -6,10 +6,30 @@
 
 #include "BleFramingTests.h"
 
+#include "base/Log.h"
 #include "ble/BleFraming.h"
+
+#include <memory>
 
 using deskflow::ble::BleFramingReader;
 using deskflow::ble::BleFramingWriter;
+
+namespace {
+// Log singleton must exist before any LOG_* call (e.g. the DEBUG1 line in
+// BleFramingReader::feedChunk). Allocate once for the whole test suite.
+std::unique_ptr<Log> g_logInstance;
+} // namespace
+
+void BleFramingTests::initTestCase()
+{
+  if (!g_logInstance)
+    g_logInstance = std::make_unique<Log>();
+}
+
+void BleFramingTests::cleanupTestCase()
+{
+  g_logInstance.reset();
+}
 
 namespace {
 

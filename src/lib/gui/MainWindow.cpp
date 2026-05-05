@@ -105,6 +105,8 @@ MainWindow::MainWindow()
     m_cbBleBackend = new QComboBox(row);
 #if defined(Q_OS_WIN)
     m_cbBleBackend->addItem(tr("WinRT"), QStringLiteral("winrt"));
+#elif defined(Q_OS_LINUX)
+    m_cbBleBackend->addItem(tr("BlueZ (Direct DBus)"), QStringLiteral("bluez"));
 #endif
     m_cbBleBackend->addItem(tr("Qt Bluetooth"), QStringLiteral("qt"));
     m_btnBlePair = new QPushButton(tr("&BLE Pair…"), row);
@@ -125,7 +127,16 @@ MainWindow::MainWindow()
     const int idx = m_cbTransport->findData(current.isEmpty() ? QStringLiteral("tcp") : current);
     m_cbTransport->setCurrentIndex(idx >= 0 ? idx : 0);
     const auto currentBackend = Settings::value(Settings::Core::BleBackend).toString();
-    const int backendIdx = m_cbBleBackend->findData(currentBackend.isEmpty() ? QStringLiteral("winrt") : currentBackend);
+    // Platform-appropriate default when the setting is empty: WinRT on
+    // Windows, Qt elsewhere (BlueZ is opt-in on Linux). Stays in sync with
+    // BleListenSocket.cpp::createBackend.
+#if defined(Q_OS_WIN)
+    const QString defaultBackend = QStringLiteral("winrt");
+#else
+    const QString defaultBackend = QStringLiteral("qt");
+#endif
+    const int backendIdx = m_cbBleBackend->findData(
+        currentBackend.isEmpty() ? defaultBackend : currentBackend);
     m_cbBleBackend->setCurrentIndex(backendIdx >= 0 ? backendIdx : 0);
     const auto updateBleControls = [this] {
       const bool ble = m_cbTransport->currentData().toString() == QStringLiteral("ble");

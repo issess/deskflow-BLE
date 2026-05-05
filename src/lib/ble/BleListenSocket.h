@@ -79,6 +79,9 @@ private:
   // 0 means "not yet negotiated"; adoptPeripheralBackend then falls back to
   // the modern BLE default (247) instead of the legacy 23-byte ATT MTU.
   int m_negotiatedMtu = 0;
+  // True once the BlueZ direct backend has failed and we've fallen back to
+  // the Qt path. Prevents ping-pong if the Qt backend also fails.
+  bool m_triedQtFallback = false;
 };
 
 // Peripheral-mode listen socket.

@@ -24,6 +24,7 @@ set(ble_sources
   BleSocketFactory.cpp
   BleSocketFactory.h
   BleTransport.h
+  IBleCentralBackend.h
   IBlePeripheralBackend.h
   qt/QtBlePeripheralBackend.cpp
   qt/QtBlePeripheralBackend.h
@@ -35,6 +36,23 @@ if(WIN32)
     win/WinRtBlePeripheralBackend.h
     win/WinRtBleCentralBackend.cpp
     win/WinRtBleCentralBackend.h
+  )
+endif()
+
+if(UNIX AND NOT APPLE)
+  list(APPEND ble_sources
+    linux/BluezAdapter.cpp
+    linux/BluezAdapter.h
+    linux/BluezAdvertisement.cpp
+    linux/BluezAdvertisement.h
+    linux/BluezBleCentralBackend.cpp
+    linux/BluezBleCentralBackend.h
+    linux/BluezBlePeripheralBackend.cpp
+    linux/BluezBlePeripheralBackend.h
+    linux/BluezDbusTypes.cpp
+    linux/BluezDbusTypes.h
+    linux/BluezGattApplication.cpp
+    linux/BluezGattApplication.h
   )
 endif()
 
@@ -60,4 +78,12 @@ if(WIN32)
     WIN32_LEAN_AND_MEAN
     NOMINMAX
   )
+endif()
+
+if(UNIX AND NOT APPLE)
+  # Linux BlueZ backend speaks org.bluez over the system bus via Qt6::DBus.
+  # Already required at the project level (cmake/Libraries.cmake) but the ble
+  # target needs an explicit link so AUTOMOC sees the metatype registration.
+  find_package(Qt6 ${REQUIRED_QT_VERSION} REQUIRED COMPONENTS DBus)
+  target_link_libraries(ble PUBLIC Qt6::DBus)
 endif()

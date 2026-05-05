@@ -33,6 +33,16 @@ create_test(
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/ble"
 )
 
+if(UNIX AND NOT APPLE)
+  create_test(
+    NAME BluezHelpersTests
+    DEPENDS ble
+    LIBS base common
+    SOURCE BluezHelpersTests.cpp
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/ble"
+  )
+endif()
+
 if(WIN32)
   # OpenSSL::applink must be linked directly to the test executable on
   # Windows: applink.c contains the OpenSSL/MSVC CRT bridge thunks and

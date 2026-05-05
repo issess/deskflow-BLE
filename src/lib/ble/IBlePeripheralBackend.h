@@ -50,6 +50,16 @@ public:
     return 64;
   }
 
+  // Configure downstream (notify) reliability before start(). Default-true
+  // backends (currently WinRT) submit each notify synchronously so a multi-
+  // chunk frame can't be coalesced/dropped at the LL layer; lossy backends
+  // fire-and-forget for higher throughput. Backends that can't honor the
+  // requested mode (e.g. Qt peripheral has no GATT-level ack path) should
+  // log once and run in their native mode.
+  virtual void setDownstreamLossless(bool /*lossless*/)
+  {
+  }
+
 Q_SIGNALS:
   // Advertising + service provider successfully published.
   void started();

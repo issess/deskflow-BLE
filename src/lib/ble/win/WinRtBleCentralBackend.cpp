@@ -605,4 +605,15 @@ quint64 WinRtBleCentralBackend::peerAddress() const
   return m_impl->peerAddress.load();
 }
 
+void WinRtBleCentralBackend::setUpstreamLossless(bool lossless)
+{
+  // Native mode is lossless (WriteWithResponse). The lossy fire-and-forget
+  // mode isn't wired here yet; honor the doc contract by logging the
+  // mismatch once and running in native mode.
+  if (!lossless) {
+    LOG_WARN("WinRtBleCentralBackend: lossy upstream requested but not "
+             "implemented — running lossless");
+  }
+}
+
 } // namespace deskflow::ble

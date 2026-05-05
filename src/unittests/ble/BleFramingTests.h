@@ -12,6 +12,9 @@ class BleFramingTests : public QObject
 {
   Q_OBJECT
 private Q_SLOTS:
+  void initTestCase();
+  void cleanupTestCase();
+
   // Existing round-trip behavior (now via instance writer + chunk reader).
   void test_roundTrip_smallPayload();
   void test_roundTrip_boundaryMtu();

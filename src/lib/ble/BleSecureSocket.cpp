@@ -181,12 +181,23 @@ void BleSecureSocket::write(const void *buffer, uint32_t n)
     if (wrote <= 0) {
       const int err = SSL_get_error(m_ssl, wrote);
       if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
-        LOG_WARN("BleSecureSocket::write SSL_write err=%d", err);
+        char errBuf[256] = {};
+        const unsigned long ossl = ERR_peek_last_error();
+        ERR_error_string_n(ossl, errBuf, sizeof(errBuf));
+        LOG_WARN("BleSecureSocket::write SSL_write err=%d ossl=0x%lx (%s) cumIn=%llu cumOut=%llu (%s)",
+                 err, ossl, errBuf,
+                 static_cast<unsigned long long>(m_cipherInBytes),
+                 static_cast<unsigned long long>(m_cipherOutBytes),
+                 m_isServer ? "server" : "client");
         m_fatal = true;
         fatalNow = true;
       }
       return;
     }
+    m_plainOutBytes += static_cast<uint64_t>(wrote);
+    LOG_DEBUG1("BleSecureSocket::write SSL_write n=%u wrote=%d cumPlainOut=%llu (%s)",
+               n, wrote, static_cast<unsigned long long>(m_plainOutBytes),
+               m_isServer ? "server" : "client");
     drainOutboundCipherLocked();
   }
   if (fatalNow)
@@ -468,6 +479,8 @@ void BleSecureSocket::driveHandshakeLocked(bool &outConnected, bool &outFailed, 
 
   m_handshakeStarted = true;
   const int r = SSL_do_handshake(m_ssl);
+  LOG_DEBUG1("BleSecureSocket: SSL_do_handshake r=%d sslErr=%d (%s)",
+             r, SSL_get_error(m_ssl, r), m_isServer ? "server" : "client");
   drainOutboundCipherLocked();
 
   if (r == 1) {
@@ -502,11 +515,21 @@ void BleSecureSocket::drainOutboundCipherLocked()
   if (!m_outBio || !m_transport)
     return;
   uint8_t buf[kCipherChunkSize];
+  uint64_t totalDrained = 0;
+  int writes = 0;
   while (true) {
     const int got = BIO_read(m_outBio, buf, sizeof(buf));
     if (got <= 0)
       break;
     m_transport->write(buf, static_cast<uint32_t>(got));
+    totalDrained += static_cast<uint64_t>(got);
+    ++writes;
+  }
+  if (writes > 0) {
+    m_cipherOutBytes += totalDrained;
+    LOG_DEBUG1("BleSecureSocket: drainOutboundCipher writes=%d bytes=%llu cumOut=%llu (%s)",
+               writes, static_cast<unsigned long long>(totalDrained),
+               static_cast<unsigned long long>(m_cipherOutBytes), m_isServer ? "server" : "client");
   }
 }
 
@@ -515,11 +538,21 @@ void BleSecureSocket::pullCiphertextFromTransportLocked()
   if (!m_inBio || !m_transport)
     return;
   uint8_t buf[kCipherChunkSize];
+  uint64_t totalPulled = 0;
+  int reads = 0;
   while (true) {
     const uint32_t got = m_transport->read(buf, sizeof(buf));
     if (got == 0)
       break;
     BIO_write(m_inBio, buf, static_cast<int>(got));
+    totalPulled += got;
+    ++reads;
+  }
+  if (reads > 0) {
+    m_cipherInBytes += totalPulled;
+    LOG_DEBUG1("BleSecureSocket: pullCiphertext reads=%d bytes=%llu cumIn=%llu (%s)",
+               reads, static_cast<unsigned long long>(totalPulled),
+               static_cast<unsigned long long>(m_cipherInBytes), m_isServer ? "server" : "client");
   }
 }
 
@@ -535,6 +568,10 @@ void BleSecureSocket::pumpDecryptedLocked(bool &outInputReadyEdge, bool &outInpu
     const int n = SSL_read(m_ssl, buf, sizeof(buf));
     if (n > 0) {
       m_plain.insert(m_plain.end(), buf, buf + n);
+      m_plainInBytes += static_cast<uint64_t>(n);
+      LOG_DEBUG1("BleSecureSocket: SSL_read got=%d plainBuf=%zu cumPlainIn=%llu (%s)",
+                 n, m_plain.size(), static_cast<unsigned long long>(m_plainInBytes),
+                 m_isServer ? "server" : "client");
       continue;
     }
     const int err = SSL_get_error(m_ssl, n);
@@ -543,9 +580,28 @@ void BleSecureSocket::pumpDecryptedLocked(bool &outInputReadyEdge, bool &outInpu
     if (err == SSL_ERROR_ZERO_RETURN) {
       m_inputShutdown = true;
       outInputShutdown = true;
+      LOG_DEBUG("BleSecureSocket: SSL_read clean shutdown (%s)", m_isServer ? "server" : "client");
       break;
     }
-    LOG_WARN("BleSecureSocket: SSL_read err=%d", err);
+    char errBuf[256] = {};
+    const unsigned long ossl = ERR_peek_last_error();
+    ERR_error_string_n(ossl, errBuf, sizeof(errBuf));
+    LOG_WARN("BleSecureSocket: SSL_read err=%d ossl=0x%lx (%s) cumIn=%llu cumOut=%llu plainIn=%llu plainOut=%llu (%s)",
+             err, ossl, errBuf,
+             static_cast<unsigned long long>(m_cipherInBytes),
+             static_cast<unsigned long long>(m_cipherOutBytes),
+             static_cast<unsigned long long>(m_plainInBytes),
+             static_cast<unsigned long long>(m_plainOutBytes),
+             m_isServer ? "server" : "client");
+    // Drain the entire OpenSSL error queue so we see the full chain (e.g.
+    // bad record MAC + decryption failed) instead of just the last entry.
+    while (true) {
+      const unsigned long e = ERR_get_error();
+      if (e == 0)
+        break;
+      ERR_error_string_n(e, errBuf, sizeof(errBuf));
+      LOG_WARN("BleSecureSocket: openssl err 0x%lx (%s)", e, errBuf);
+    }
     m_fatal = true;
     break;
   }

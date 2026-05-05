@@ -122,6 +122,12 @@ private:
 
   // Plaintext buffer for upper-layer reads.
   std::vector<uint8_t> m_plain;
+
+  // Diagnostic byte counters (DEBUG logging only).
+  uint64_t m_cipherInBytes = 0;  // ciphertext pulled from transport into BIO
+  uint64_t m_cipherOutBytes = 0; // ciphertext drained from BIO to transport
+  uint64_t m_plainInBytes = 0;   // plaintext successfully decrypted
+  uint64_t m_plainOutBytes = 0;  // plaintext submitted to SSL_write
 };
 
 } // namespace deskflow::ble
