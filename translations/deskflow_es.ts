@@ -675,6 +675,18 @@ Además, verifique que puede %1 el archivo de configuración del servidor: %2</t
         <source>Paired BLE device: %1</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>BlueZ (Direct DBus)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Lossless</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Lossless BLE transport. Server (peripheral) role serializes GATT notify on an ATT-confirmed path; client (central) role uses WriteWithResponse for each write. Each host only controls the direction it sends, so set this on both peers to make the link fully lossless. Required for stable TLS over BLE; reduces peak throughput. Takes effect on the next BLE (re)connection — restart the core to apply immediately.</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>NewScreenWidget</name>
