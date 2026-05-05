@@ -703,6 +703,12 @@ void BleSocketContext::onCharacteristicChanged(const QLowEnergyCharacteristic &c
 
 BleSocket::BleSocket(IEventQueue *events) : IDataSocket(events), m_events(events), m_ctx(new BleSocketContext(this))
 {
+  // Qt Bluetooth needs a thread with a running Qt event loop so QueuedConnection
+  // invocations actually fire. In deskflow-core the constructing thread runs the
+  // deskflow event queue, not Qt's, so we hand m_ctx to the main (Qt) thread.
+  if (QCoreApplication::instance() && m_ctx->thread() != QCoreApplication::instance()->thread()) {
+    m_ctx->moveToThread(QCoreApplication::instance()->thread());
+  }
 }
 
 BleSocket::~BleSocket()

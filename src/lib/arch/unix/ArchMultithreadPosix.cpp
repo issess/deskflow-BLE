@@ -585,7 +585,8 @@ void ArchMultithreadPosix::refThread(ArchThreadImpl *thread)
 
 void ArchMultithreadPosix::testCancelThreadImpl(ArchThreadImpl *thread)
 {
-  assert(thread != nullptr);
+  if (thread == nullptr)
+    return; // unknown thread (e.g. std::thread spawned outside Arch::newThread)
 
   // update cancel state
   std::scoped_lock lock{m_threadMutex};
