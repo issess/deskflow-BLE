@@ -32,6 +32,7 @@ public:
   void sendPairingStatus(quint8 status) override;
   void sendDownstream(const QByteArray &chunk) override;
   int negotiatedMtu() const override;
+  void setDownstreamLossless(bool lossless) override;
 
 private:
   // Pimpl to keep WinRT headers out of other translation units.

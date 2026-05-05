@@ -166,6 +166,11 @@ struct WinRtBleCentralBackend::Impl
   std::atomic<bool> running{false};
   std::atomic<int> mtu{64};
   std::atomic<bool> pairingAccepted{false};
+  // Default-true: WriteWithResponse + .get() per chunk, ATT-acked, lossless
+  // (matches the BLE-on-TLS requirement that ciphertext arrive in order with
+  // no gaps). False: WriteWithoutResponse fire-and-forget for higher
+  // throughput; relies on BleFraming drop-and-resync, incompatible with TLS.
+  std::atomic<bool> upstreamLossless{true};
   // Peer's 48-bit BT address — captured in doConnect for the consumer to
   // persist as a remembered-peer hint for the next session's reconnect.
   std::atomic<uint64_t> peerAddress{0};
@@ -518,29 +523,64 @@ struct WinRtBleCentralBackend::Impl
   {
     if (!chDataUpstream)
       return;
-    // GATT WriteWithResponse with synchronous .get(). The ATT-level ack is
-    // what gives us actual end-to-end delivery confirmation — WinRT's
-    // .get() on WriteWithoutResponse only confirms the OS BT stack
-    // accepted the request, leaving room for silent LL drops to corrupt
-    // the inbound TLS record stream on the peer (a single missing byte
-    // fails MAC verification and tears the connection down).
-    // Per-chunk RTT is ~one Connection Event (7.5–15 ms with
-    // ThroughputOptimized parameters). For Deskflow's typical sparse
-    // input events (mouse moves at 60–120 Hz, keystrokes <30 Hz),
-    // each write completes well within the inter-event gap, so the
-    // user-visible end-to-end latency is unchanged versus async — both
-    // are LL-bound for the wire transit anyway. Bulk transfers cap out
-    // around 6–12 KB/s, which matches the bench-measured BLE limit.
+    // Lossless (default): GATT WriteWithResponse with synchronous .get(). The
+    // ATT-level ack is what gives us actual end-to-end delivery confirmation —
+    // WinRT's .get() on WriteWithoutResponse only confirms the OS BT stack
+    // accepted the request, leaving room for silent LL drops to corrupt the
+    // inbound TLS record stream on the peer (a single missing byte fails MAC
+    // verification and tears the connection down).
+    //   Per-chunk RTT is ~one Connection Event (7.5–15 ms with
+    //   ThroughputOptimized parameters). For Deskflow's typical sparse input
+    //   events (mouse moves at 60–120 Hz, keystrokes <30 Hz), each write
+    //   completes well within the inter-event gap, so the user-visible
+    //   end-to-end latency is unchanged versus async — both are LL-bound for
+    //   the wire transit anyway. Bulk transfers cap out around 6–12 KB/s,
+    //   which matches the bench-measured BLE limit.
+    // Lossy: WriteWithoutResponse, no .get() — the OS releases the worker as
+    // soon as the request is queued. Trades reliability for throughput;
+    // incompatible with TLS-on-BLE because the framing layer's drop-and-resync
+    // strategy will eventually nuke a TLS record's MAC.
+    const bool lossless = upstreamLossless.load();
+    const auto opt =
+        lossless ? wgap::GattWriteOption::WriteWithResponse : wgap::GattWriteOption::WriteWithoutResponse;
     constexpr int kMaxAttempts = 5;
     constexpr DWORD kBackoffMs = 1;
     for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
       try {
         auto buf = toIBuffer(chunk);
-        const auto status =
-            chDataUpstream.WriteValueAsync(buf, wgap::GattWriteOption::WriteWithResponse).get();
-        if (status != wgap::GattCommunicationStatus::Success) {
-          LOG_WARN("WinRtBleCentralBackend: write status=%d size=%d attempt=%d",
-                   static_cast<int>(status), chunk.size(), attempt);
+        if (lossless) {
+          const auto status = chDataUpstream.WriteValueAsync(buf, opt).get();
+          if (status != wgap::GattCommunicationStatus::Success) {
+            LOG_WARN("WinRtBleCentralBackend: write status=%d size=%d attempt=%d",
+                     static_cast<int>(status), chunk.size(), attempt);
+          }
+        } else {
+          // Fire-and-forget: kick the async op and return immediately. We
+          // still log on completion so a persistent OS failure doesn't go
+          // silent.
+          auto op = chDataUpstream.WriteValueAsync(buf, opt);
+          const int sz = chunk.size();
+          op.Completed(
+              [sz](wfnd::IAsyncOperation<wgap::GattCommunicationStatus> const &asyncOp,
+                   wfnd::AsyncStatus status) {
+                if (status != wfnd::AsyncStatus::Completed) {
+                  LOG_WARN("WinRtBleCentralBackend: write async-completion failed status=%d size=%d",
+                           static_cast<int>(status), sz);
+                  return;
+                }
+                try {
+                  const auto comm = asyncOp.GetResults();
+                  if (comm != wgap::GattCommunicationStatus::Success) {
+                    LOG_WARN("WinRtBleCentralBackend: write(lossy) status=%d size=%d",
+                             static_cast<int>(comm), sz);
+                  }
+                } catch (const winrt::hresult_error &e) {
+                  LOG_WARN("WinRtBleCentralBackend: write(lossy) threw hr=0x%08x size=%d",
+                           static_cast<unsigned>(e.code().value), sz);
+                } catch (...) {
+                  LOG_WARN("WinRtBleCentralBackend: write(lossy) threw unknown size=%d", sz);
+                }
+              });
         }
         return;
       } catch (const winrt::hresult_error &e) {
@@ -563,7 +603,7 @@ struct WinRtBleCentralBackend::Impl
 };
 
 WinRtBleCentralBackend::WinRtBleCentralBackend(QObject *parent)
-    : QObject(parent), m_impl(std::make_unique<Impl>())
+    : IBleCentralBackend(parent), m_impl(std::make_unique<Impl>())
 {
   m_impl->owner = this;
   m_impl->worker.start();
@@ -607,13 +647,10 @@ quint64 WinRtBleCentralBackend::peerAddress() const
 
 void WinRtBleCentralBackend::setUpstreamLossless(bool lossless)
 {
-  // Native mode is lossless (WriteWithResponse). The lossy fire-and-forget
-  // mode isn't wired here yet; honor the doc contract by logging the
-  // mismatch once and running in native mode.
-  if (!lossless) {
-    LOG_WARN("WinRtBleCentralBackend: lossy upstream requested but not "
-             "implemented — running lossless");
-  }
+  if (!m_impl)
+    return;
+  m_impl->upstreamLossless.store(lossless);
+  LOG_NOTE("WinRT central: upstream mode = %s", lossless ? "lossless" : "lossy");
 }
 
 } // namespace deskflow::ble

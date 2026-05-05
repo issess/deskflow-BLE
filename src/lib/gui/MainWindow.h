@@ -25,6 +25,7 @@
 #endif
 
 class QAction;
+class QCheckBox;
 class QComboBox;
 class QMenu;
 class QLocalServer;
@@ -208,6 +209,7 @@ private:
   QComboBox *m_cbTransport = nullptr;
   QComboBox *m_cbBleBackend = nullptr;
   QPushButton *m_btnBlePair = nullptr;
+  QCheckBox *m_cbBleStreamLossless = nullptr;
 
   // Network monitoring
   NetworkMonitor *m_networkMonitor = nullptr;

@@ -228,6 +228,11 @@ struct WinRtBlePeripheralBackend::Impl
   // Heap-allocated so Completed lambdas can decrement safely even if Impl is
   // torn down before the OS finalises the async op.
   std::shared_ptr<std::atomic<int>> dsInflight = std::make_shared<std::atomic<int>>(0);
+  // True (default): pump submits each notify synchronously via .get(), serialising
+  // delivery so multi-chunk frames can't be coalesced/dropped at the LL layer.
+  // False: pump fires NotifyValueAsync without awaiting (gated by inflight window
+  // for OS-side backpressure) — higher throughput, accepts framing-layer drops.
+  std::atomic<bool> downstreamLossless{true};
 
   void emitStartFailed(const QString &reason)
   {
@@ -905,6 +910,14 @@ struct WinRtBlePeripheralBackend::Impl
   void workerPumpDownstream()
   {
     while (true) {
+      // Lossy path: gate on inflight window so the OS BT stack buffer can't
+      // overflow. With async submit the pump otherwise unwinds the queue at
+      // upper-layer speed, parking 100ms+ worth of notifies in the OS that
+      // then silently drop. Sleep keeps the worker thread responsive.
+      if (!downstreamLossless.load() && dsInflight->load() >= kDownstreamInflightWindow) {
+        ::Sleep(1);
+        continue;
+      }
       QByteArray next;
       {
         std::lock_guard<std::mutex> lock(dsMu);
@@ -915,7 +928,10 @@ struct WinRtBlePeripheralBackend::Impl
         next = dsQueue.front();
         dsQueue.pop_front();
       }
-      workerSubmitDownstreamSync(next);
+      if (downstreamLossless.load())
+        workerSubmitDownstreamSync(next);
+      else
+        workerSubmitDownstreamAsync(next);
     }
   }
 
@@ -1099,6 +1115,14 @@ void WinRtBlePeripheralBackend::sendDownstream(const QByteArray &chunk)
 int WinRtBlePeripheralBackend::negotiatedMtu() const
 {
   return m_impl ? m_impl->mtu.load() : 64;
+}
+
+void WinRtBlePeripheralBackend::setDownstreamLossless(bool lossless)
+{
+  if (!m_impl)
+    return;
+  m_impl->downstreamLossless.store(lossless);
+  LOG_NOTE("WinRT peripheral: downstream mode = %s", lossless ? "lossless" : "lossy");
 }
 
 } // namespace deskflow::ble

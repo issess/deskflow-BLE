@@ -30,6 +30,10 @@ public:
   // Truly fire-and-forget upstream write. Each chunk is one ATT PDU.
   void writeUpstream(const QByteArray &chunk) override;
 
+  // Configure upstream reliability. Default true: WriteWithResponse + .get()
+  // (per-chunk ATT-acked, lossless, ~one connection-event of latency). False:
+  // WriteWithoutResponse fire-and-forget (higher throughput, accepts BleFraming
+  // drop-and-resync). Must be called before the first writeUpstream().
   void setUpstreamLossless(bool lossless) override;
 
   int mtu() const override;

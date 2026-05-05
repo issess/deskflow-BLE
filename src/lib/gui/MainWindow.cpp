@@ -110,10 +110,19 @@ MainWindow::MainWindow()
 #endif
     m_cbBleBackend->addItem(tr("Qt Bluetooth"), QStringLiteral("qt"));
     m_btnBlePair = new QPushButton(tr("&BLE Pair…"), row);
+    m_cbBleStreamLossless = new QCheckBox(tr("Lossless"), row);
+    m_cbBleStreamLossless->setToolTip(
+        tr("Lossless BLE transport. Server (peripheral) role serializes GATT notify "
+           "on an ATT-confirmed path; client (central) role uses WriteWithResponse "
+           "for each write. Each host only controls the direction it sends, so set "
+           "this on both peers to make the link fully lossless. Required for stable "
+           "TLS over BLE; reduces peak throughput. Takes effect on the next BLE "
+           "(re)connection — restart the core to apply immediately."));
     rowLayout->addWidget(label);
     rowLayout->addWidget(m_cbTransport);
     rowLayout->addWidget(backendLabel);
     rowLayout->addWidget(m_cbBleBackend);
+    rowLayout->addWidget(m_cbBleStreamLossless);
     rowLayout->addStretch();
     rowLayout->addWidget(m_btnBlePair);
     // Insert just below the Server/Client mode selector (index 0 is the
@@ -138,10 +147,13 @@ MainWindow::MainWindow()
     const int backendIdx = m_cbBleBackend->findData(
         currentBackend.isEmpty() ? defaultBackend : currentBackend);
     m_cbBleBackend->setCurrentIndex(backendIdx >= 0 ? backendIdx : 0);
+    m_cbBleStreamLossless->setChecked(
+        Settings::value(Settings::Core::BleStreamLossless).toBool());
     const auto updateBleControls = [this] {
       const bool ble = m_cbTransport->currentData().toString() == QStringLiteral("ble");
       m_btnBlePair->setEnabled(ble);
       m_cbBleBackend->setEnabled(ble);
+      m_cbBleStreamLossless->setEnabled(ble);
     };
     updateBleControls();
 
@@ -157,6 +169,17 @@ MainWindow::MainWindow()
     connect(m_cbBleBackend, &QComboBox::currentIndexChanged, this, [this](int) {
       Settings::setValue(Settings::Core::BleBackend, m_cbBleBackend->currentData().toString());
       Settings::save();
+    });
+
+    connect(m_cbBleStreamLossless, &QCheckBox::toggled, this, [this](bool checked) {
+      Settings::setValue(Settings::Core::BleStreamLossless, checked);
+      Settings::save();
+      // Both BleListenSocket (peripheral) and BleSocketContext::startCentral
+      // (central) read this key at start time. Restart core if it's running so
+      // the change takes effect on the next (re)connection without the user
+      // having to flip the toggle and click Restart separately.
+      if (m_coreProcess.isStarted())
+        m_coreProcess.restart();
     });
 
     connect(m_btnBlePair, &QPushButton::clicked, this, [this] {

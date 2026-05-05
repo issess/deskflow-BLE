@@ -15,11 +15,15 @@
 #include "ble/BlePairingCode.h"
 #include "ble/BleProtocolClassifier.h"
 #include "ble/BleTransport.h"
+#include "ble/IBleCentralBackend.h"
 #include "ble/IBlePeripheralBackend.h"
 #include "common/Settings.h"
 
 #ifdef Q_OS_WIN
 #include "ble/win/WinRtBleCentralBackend.h"
+#endif
+#ifdef Q_OS_LINUX
+#include "ble/linux/BluezBleCentralBackend.h"
 #endif
 
 
@@ -128,59 +132,63 @@ void BleSocketContext::startCentral(QString savedDeviceId, QString code)
              savedDeviceId.toUtf8().constData());
   }
 
+  // Direct (non-Qt) central backend per platform. Bypasses Qt's
+  // QLowEnergyController so the upstream-write path can run truly async.
 #ifdef Q_OS_WIN
-  // Windows: use direct WinRT central backend. Bypasses Qt's QLowEnergyController
-  // entirely so the upstream-write path can call WriteValueAsync truly async.
-  m_winrtCentral = new WinRtBleCentralBackend(this);
-  m_winrtCentral->setUpstreamLossless(m_upstreamLossless);
-  QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::connected, this, [this] {
-    m_pairingAccepted = true;
-    BlePairingBroker::instance().clearPendingCode();
-    BlePairingBroker::instance().reportResult(true, QString());
-    QTextStream(stdout) << "BLE_PAIRING:RESULT=accepted:" << Qt::endl;
-    Settings::setValue(Settings::Client::PendingBleCode, QString());
-    // Persist the peer's BT address so the next BleSocket::connect() can pass
-    // it as the remembered-peer hint, allowing reconnect without a fresh PIN.
-    // Format as zero-padded 48-bit hex with colons (matches the pattern that
-    // parseDirectBleAddress() and the human-edited config also accept).
-    if (m_winrtCentral) {
-      const quint64 addr = m_winrtCentral->peerAddress();
-      if (addr != 0) {
-        QString mac = QString::asprintf("%02X:%02X:%02X:%02X:%02X:%02X",
-                                        static_cast<unsigned>((addr >> 40) & 0xFF),
-                                        static_cast<unsigned>((addr >> 32) & 0xFF),
-                                        static_cast<unsigned>((addr >> 24) & 0xFF),
-                                        static_cast<unsigned>((addr >> 16) & 0xFF),
-                                        static_cast<unsigned>((addr >> 8) & 0xFF),
-                                        static_cast<unsigned>(addr & 0xFF));
-        Settings::setValue(Settings::Client::RemoteBleDevice, mac);
-        LOG_NOTE("BLE central (WinRT): saved remembered peer %s", mac.toUtf8().constData());
-      }
-    }
-    Settings::save();
-    if (m_owner)
-      m_owner->notifyConnected();
-  });
-  QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::disconnected, this, [this] {
-    if (m_owner)
-      m_owner->notifyDisconnected();
-  });
-  QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::connectFailed, this,
-                   [this](const QString &reason) { failCentral(reason); });
-  QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::dataReceived, this,
-                   [this](const QByteArray &data) {
-                     if (m_owner)
-                       m_owner->deliverInbound(data);
-                   });
-  QObject::connect(m_winrtCentral, &WinRtBleCentralBackend::mtuChanged, this, [this](int v) {
-    if (v > 0) {
-      m_mtu = v;
-      LOG_NOTE("BLE central (WinRT): MTU=%d", v);
-    }
-  });
-  m_winrtCentral->start(savedDeviceId, code, parseDirectBleAddress());
-  return;
+  m_directCentral = new WinRtBleCentralBackend(this);
+#elif defined(Q_OS_LINUX)
+  m_directCentral = new BluezBleCentralBackend(this);
 #endif
+  if (m_directCentral) {
+    m_directCentral->setUpstreamLossless(m_upstreamLossless);
+    QObject::connect(m_directCentral, &IBleCentralBackend::connected, this, [this] {
+      m_pairingAccepted = true;
+      BlePairingBroker::instance().clearPendingCode();
+      BlePairingBroker::instance().reportResult(true, QString());
+      QTextStream(stdout) << "BLE_PAIRING:RESULT=accepted:" << Qt::endl;
+      Settings::setValue(Settings::Client::PendingBleCode, QString());
+      // Persist the peer's BT address so the next BleSocket::connect() can pass
+      // it as the remembered-peer hint, allowing reconnect without a fresh PIN.
+      // Format as zero-padded 48-bit hex with colons (matches the pattern that
+      // parseDirectBleAddress() and the human-edited config also accept).
+      if (m_directCentral) {
+        const quint64 addr = m_directCentral->peerAddress();
+        if (addr != 0) {
+          QString mac = QString::asprintf("%02X:%02X:%02X:%02X:%02X:%02X",
+                                          static_cast<unsigned>((addr >> 40) & 0xFF),
+                                          static_cast<unsigned>((addr >> 32) & 0xFF),
+                                          static_cast<unsigned>((addr >> 24) & 0xFF),
+                                          static_cast<unsigned>((addr >> 16) & 0xFF),
+                                          static_cast<unsigned>((addr >> 8) & 0xFF),
+                                          static_cast<unsigned>(addr & 0xFF));
+          Settings::setValue(Settings::Client::RemoteBleDevice, mac);
+          LOG_NOTE("BLE central (direct): saved remembered peer %s", mac.toUtf8().constData());
+        }
+      }
+      Settings::save();
+      if (m_owner)
+        m_owner->notifyConnected();
+    });
+    QObject::connect(m_directCentral, &IBleCentralBackend::disconnected, this, [this] {
+      if (m_owner)
+        m_owner->notifyDisconnected();
+    });
+    QObject::connect(m_directCentral, &IBleCentralBackend::connectFailed, this,
+                     [this](const QString &reason) { failCentral(reason); });
+    QObject::connect(m_directCentral, &IBleCentralBackend::dataReceived, this,
+                     [this](const QByteArray &data) {
+                       if (m_owner)
+                         m_owner->deliverInbound(data);
+                     });
+    QObject::connect(m_directCentral, &IBleCentralBackend::mtuChanged, this, [this](int v) {
+      if (v > 0) {
+        m_mtu = v;
+        LOG_NOTE("BLE central (direct): MTU=%d", v);
+      }
+    });
+    m_directCentral->start(savedDeviceId, code, parseDirectBleAddress());
+    return;
+  }
 
   LOG_NOTE("BLE central: creating device discovery agent");
   m_discovery = new QBluetoothDeviceDiscoveryAgent(this);
@@ -523,13 +531,11 @@ void BleSocketContext::failCentral(const QString &reason)
 
 void BleSocketContext::detach()
 {
-#ifdef Q_OS_WIN
-  if (m_winrtCentral) {
-    m_winrtCentral->stop();
-    m_winrtCentral->deleteLater();
-    m_winrtCentral = nullptr;
+  if (m_directCentral) {
+    m_directCentral->stop();
+    m_directCentral->deleteLater();
+    m_directCentral = nullptr;
   }
-#endif
   if (m_service) {
     QObject::disconnect(m_service, nullptr, this, nullptr);
   }
@@ -574,14 +580,13 @@ void BleSocketContext::enqueueOutbound(QByteArray payload)
     return;
   }
 
-#ifdef Q_OS_WIN
-  // Windows central: bypass Qt's writeCharacteristic entirely.
-  if (m_role == Role::Central && m_winrtCentral) {
+  // Direct central backend (Windows WinRT, Linux BlueZ): bypass Qt's
+  // writeCharacteristic entirely.
+  if (m_role == Role::Central && m_directCentral) {
     for (const auto &c : frame.chunks)
-      m_winrtCentral->writeUpstream(c);
+      m_directCentral->writeUpstream(c);
     return;
   }
-#endif
 
   if (!m_service)
     return;
